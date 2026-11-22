@@ -86,64 +86,26 @@ if [ -f "$PREFIX/bin/aapt2" ]; then
     fi
 fi
 
-# 2. Gestão Inteligente da Keystore e Palavra-passe Permanente (Nunca mais pergunta)
-echo -e "\n${YELLOW}[2/5] Configuração da Keystore e Palavra-passe Permanente...${NC}"
+# 2. Configuração da Keystore Existente (Pede sempre a palavra-passe para assinar)
+echo -e "
+${YELLOW}[2/5] Configuração da Keystore e Palavra-passe...${NC}"
 KEYSTORE_FILE="${ROOT_DIR}/my-upload-key.jks"
 KEY_ALIAS="upload"
 
-# Procura a palavra-passe memorizada em cache
-STORE_PASS=""
-for pf in "${ROOT_DIR}/.keystore_pass" "$HOME/.zerox_keystore_pass" "$HOME/.keystore_pass"; do
-    if [ -f "$pf" ] && [ -s "$pf" ]; then
-        STORE_PASS=$(cat "$pf" | tr -d '\r\n')
-        break
-    fi
-done
+rm -f "${ROOT_DIR}/.keystore_pass" "$HOME/.zerox_keystore_pass" "$HOME/.keystore_pass" 2>/dev/null || true
 
-if [ -n "$STORE_PASS" ]; then
-    echo -e "${GREEN}✓ Palavra-passe carregada automaticamente da memória (não precisa digitar novamente)!${NC}"
-elif [ -f "$KEYSTORE_FILE" ]; then
-    echo -e "${YELLOW}Keystore encontrada em $KEYSTORE_FILE, mas sem palavra-passe salva em cache.${NC}"
-    echo -n "Digite a sua palavra-passe da keystore (será guardada permanentemente para nunca mais pedir): "
+if [ -f "$KEYSTORE_FILE" ]; then
+    echo -e "${GREEN}✓ Keystore encontrada em: $KEYSTORE_FILE${NC}"
+    echo -n "Digite a palavra-passe da sua keystore para assinar: "
     read -rs STORE_PASS
     echo ""
     if [ -z "$STORE_PASS" ]; then
         echo -e "${RED}Erro: A palavra-passe não pode ser vazia!${NC}"
         exit 1
     fi
-    echo "$STORE_PASS" > "${ROOT_DIR}/.keystore_pass"
-    echo "$STORE_PASS" > "$HOME/.zerox_keystore_pass"
-    chmod 600 "${ROOT_DIR}/.keystore_pass" "$HOME/.zerox_keystore_pass" 2>/dev/null || true
-    echo -e "${GREEN}✓ Palavra-passe memorizada com segurança em .keystore_pass!${NC}"
 else
-    echo -e "${YELLOW}Nenhuma keystore encontrada. Criando nova keystore permanente (my-upload-key.jks)...${NC}"
-    echo -n "Crie a palavra-passe para a sua Keystore: "
-    read -rs STORE_PASS
-    echo ""
-    echo -n "Confirme a palavra-passe: "
-    read -rs STORE_PASS_CONFIRM
-    echo ""
-
-    if [ "$STORE_PASS" != "$STORE_PASS_CONFIRM" ]; then
-        echo -e "${RED}Erro: As palavras-passe não coincidem! Execute o script novamente.${NC}"
-        exit 1
-    fi
-
-    echo "$STORE_PASS" > "${ROOT_DIR}/.keystore_pass"
-    echo "$STORE_PASS" > "$HOME/.zerox_keystore_pass"
-    chmod 600 "${ROOT_DIR}/.keystore_pass" "$HOME/.zerox_keystore_pass" 2>/dev/null || true
-
-    keytool -genkeypair -v \
-        -keystore "$KEYSTORE_FILE" \
-        -alias "$KEY_ALIAS" \
-        -keyalg RSA \
-        -keysize 2048 \
-        -validity 10000 \
-        -storepass "$STORE_PASS" \
-        -keypass "$STORE_PASS" \
-        -dname "CN=Zerox VPN, OU=Development, O=Zerox, L=Luanda, ST=Luanda, C=AO"
-    
-    echo -e "${GREEN}✓ Keystore criada e salva com sucesso em $KEYSTORE_FILE!${NC}"
+    echo -e "${RED}Erro: Keystore não encontrada em $KEYSTORE_FILE! Coloca a tua my-upload-key.jks na pasta do projeto.${NC}"
+    exit 1
 fi
 
 KEY_PASS="$STORE_PASS"
