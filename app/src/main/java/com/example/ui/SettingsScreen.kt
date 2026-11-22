@@ -327,7 +327,7 @@ fun SettingsScreen(
 
         Spacer(modifier = Modifier.height(20.dp))
 
-        // Start.io Diagnostics & GDPR/CCPA Consent Card
+        // Google AdMob Diagnostics & GDPR/CCPA Consent Card
         Surface(
             shape = RoundedCornerShape(16.dp),
             color = CyberSurfaceVariant,
@@ -345,12 +345,12 @@ fun SettingsScreen(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(
                         imageVector = Icons.Default.Shield,
-                        contentDescription = "Start.io SDK",
+                        contentDescription = "Google AdMob",
                         tint = if (isSdkInitialized) CyberSecondary else CyberPrimary
                     )
                     Spacer(modifier = Modifier.width(10.dp))
                     Text(
-                        text = "Anúncios Start.io & Consentimento",
+                        text = "Anúncios Google AdMob & Consentimento",
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold,
                         color = CyberTextMain
@@ -358,8 +358,10 @@ fun SettingsScreen(
                 }
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
-                    text = "App ID: ${RewardedAdManager.STARTIO_APP_ID} • Pacote: ${BuildConfig.APPLICATION_ID}\n" +
-                        "SDK: ${if (isSdkInitialized) "Inicializado (Produção)" else "Aguardando inicialização"}\n" +
+                    text = "App ID: ${RewardedAdManager.ADMOB_APP_ID}\n" +
+                        "Bloco Recompensado: ${RewardedAdManager.ADMOB_REWARDED_AD_UNIT_ID}\n" +
+                        "Pacote: ${BuildConfig.APPLICATION_ID}\n" +
+                        "SDK: ${if (isSdkInitialized) "Inicializado (Google AdMob)" else "Aguardando inicialização"}\n" +
                         "Estado do anúncio: ${
                             when (adLoadState) {
                                 AdLoadState.Idle -> "Ocioso (pronto para carregar)"
@@ -387,9 +389,9 @@ fun SettingsScreen(
                         )
                         Text(
                             text = if (adConsentState.personalizedAdsGranted) {
-                                "Consentimento ativo (pas=true, CCPA=1YNN)"
+                                "Consentimento ativo (anúncios personalizados)"
                             } else {
-                                "Apenas anúncios não personalizados (pas=false)"
+                                "Apenas anúncios não personalizados (npa=1)"
                             },
                             style = MaterialTheme.typography.bodySmall,
                             color = CyberTextMuted
@@ -451,7 +453,7 @@ fun SettingsScreen(
                 }
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
-                    text = "A ligação VPN só é iniciada após exibir e fechar um anúncio válido do Start.io. Confirme no portal.start.io o pacote ${BuildConfig.APPLICATION_ID} e o app-ads.txt.",
+                    text = "A ligação VPN só é iniciada após exibir e fechar um anúncio válido do Google AdMob. Ao publicar na Google Play Store, basta substituir o seu App ID e Bloco de Anúncios de produção.",
                     style = MaterialTheme.typography.bodySmall,
                     color = CyberTextMuted
                 )

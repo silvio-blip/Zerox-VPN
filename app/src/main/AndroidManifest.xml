@@ -23,17 +23,10 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.MyApplication">
 
+        <!-- Google AdMob Application ID (Substitua pelo seu App ID de produção do AdMob no console Google AdMob) -->
         <meta-data
-            android:name="com.startapp.sdk.APPLICATION_ID"
-            android:value="210992352" />
-
-        <meta-data
-            android:name="com.startapp.sdk.RETURN_ADS_ENABLED"
-            android:value="false" />
-
-        <meta-data
-            android:name="com.startapp.sdk.CONSENT_ENABLED"
-            android:value="false" />
+            android:name="com.google.android.gms.ads.APPLICATION_ID"
+            android:value="ca-app-pub-3940256099942544~3347511713" />
 
         <activity
             android:name=".MainActivity"

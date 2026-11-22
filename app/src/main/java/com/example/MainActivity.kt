@@ -779,7 +779,7 @@ private fun PrivacyConsentDialog(
                 )
                 Spacer(modifier = Modifier.height(10.dp))
                 Text(
-                    text = "A Zerox VPN mantém os servidores gratuitos com apoio de anúncios da rede Start.io. Deseja permitir anúncios personalizados?",
+                    text = "A Zerox VPN mantém os servidores gratuitos com apoio de anúncios da rede Google AdMob. Deseja permitir anúncios personalizados?",
                     style = MaterialTheme.typography.bodyMedium,
                     color = CyberTextMuted
                 )
