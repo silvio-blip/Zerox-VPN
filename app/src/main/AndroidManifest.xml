@@ -23,10 +23,10 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.MyApplication">
 
-        <!-- Google AdMob Application ID (Substitua pelo seu App ID de produção do AdMob no console Google AdMob) -->
+        <!-- Google AdMob Application ID (Produção: configurado em res/values/strings.xml) -->
         <meta-data
             android:name="com.google.android.gms.ads.APPLICATION_ID"
-            android:value="ca-app-pub-3940256099942544~3347511713" />
+            android:value="@string/admob_app_id" />
 
         <activity
             android:name=".MainActivity"

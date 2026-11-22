@@ -50,16 +50,13 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.example.BuildConfig
 import com.example.ads.AdConsentState
 import com.example.ads.AdLoadState
-import com.example.ads.RewardedAdManager
 import com.example.model.DnsProvider
 import com.example.model.PermanentPermissionsStatus
 import com.example.model.VpnProtocol
 import com.example.model.VpnSettings
 import com.example.ui.theme.CyberBackground
-import com.example.ui.theme.CyberError
 import com.example.ui.theme.CyberOutline
 import com.example.ui.theme.CyberPrimary
 import com.example.ui.theme.CyberSecondary
@@ -320,141 +317,6 @@ fun SettingsScreen(
                 Text(
                     text = "O Zerox VPN opera com política estrita de zero registro (zero logs). Todo o tráfego de dados, jogos e navegação é criptografado por túneis seguros SOCKS5/HTTPS para garantir total privacidade e autenticação correta em servidores internacionais.",
                     style = MaterialTheme.typography.bodyMedium,
-                    color = CyberTextMuted
-                )
-            }
-        }
-
-        Spacer(modifier = Modifier.height(20.dp))
-
-        // Google AdMob Diagnostics & GDPR/CCPA Consent Card
-        Surface(
-            shape = RoundedCornerShape(16.dp),
-            color = CyberSurfaceVariant,
-            border = BorderStroke(
-                1.dp,
-                when (adLoadState) {
-                    is AdLoadState.Ready -> CyberSecondary.copy(alpha = 0.5f)
-                    is AdLoadState.Error -> CyberError.copy(alpha = 0.5f)
-                    else -> CyberPrimary.copy(alpha = 0.3f)
-                }
-            ),
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Column(modifier = Modifier.padding(16.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        imageVector = Icons.Default.Shield,
-                        contentDescription = "Google AdMob",
-                        tint = if (isSdkInitialized) CyberSecondary else CyberPrimary
-                    )
-                    Spacer(modifier = Modifier.width(10.dp))
-                    Text(
-                        text = "Anúncios Google AdMob & Consentimento",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold,
-                        color = CyberTextMain
-                    )
-                }
-                Spacer(modifier = Modifier.height(8.dp))
-                Text(
-                    text = "App ID: ${RewardedAdManager.ADMOB_APP_ID}\n" +
-                        "Bloco Recompensado: ${RewardedAdManager.ADMOB_REWARDED_AD_UNIT_ID}\n" +
-                        "Pacote: ${BuildConfig.APPLICATION_ID}\n" +
-                        "SDK: ${if (isSdkInitialized) "Inicializado (Google AdMob)" else "Aguardando inicialização"}\n" +
-                        "Estado do anúncio: ${
-                            when (adLoadState) {
-                                AdLoadState.Idle -> "Ocioso (pronto para carregar)"
-                                is AdLoadState.Loading -> "Carregando (${adLoadState.modeLabel})..."
-                                is AdLoadState.Ready -> "Carregado e pronto (${adLoadState.modeLabel})"
-                                is AdLoadState.Error -> "Falha: ${adLoadState.detail}"
-                            }
-                        }",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = if (adLoadState is AdLoadState.Error) CyberError else CyberTextMuted
-                )
-
-                Spacer(modifier = Modifier.height(12.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(modifier = Modifier.weight(1f).padding(end = 10.dp)) {
-                        Text(
-                            text = "Anúncios Personalizados (GDPR/CCPA)",
-                            style = MaterialTheme.typography.bodyMedium,
-                            fontWeight = FontWeight.SemiBold,
-                            color = CyberTextMain
-                        )
-                        Text(
-                            text = if (adConsentState.personalizedAdsGranted) {
-                                "Consentimento ativo (anúncios personalizados)"
-                            } else {
-                                "Apenas anúncios não personalizados (npa=1)"
-                            },
-                            style = MaterialTheme.typography.bodySmall,
-                            color = CyberTextMuted
-                        )
-                    }
-                    Switch(
-                        checked = adConsentState.personalizedAdsGranted,
-                        onCheckedChange = { onUpdateAdConsent(it) },
-                        colors = SwitchDefaults.colors(
-                            checkedThumbColor = CyberSecondary,
-                            checkedTrackColor = CyberPrimary.copy(alpha = 0.4f)
-                        ),
-                        modifier = Modifier.testTag("ad_consent_toggle")
-                    )
-                }
-
-                Spacer(modifier = Modifier.height(14.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    OutlinedButton(
-                        onClick = onTestLoadAd,
-                        enabled = adLoadState !is AdLoadState.Loading,
-                        border = BorderStroke(1.dp, CyberPrimary),
-                        shape = RoundedCornerShape(12.dp),
-                        modifier = Modifier
-                            .weight(1f)
-                            .height(48.dp)
-                            .testTag("test_load_ad_button")
-                    ) {
-                        Text(
-                            text = "1. Carregar",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = CyberPrimary,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-                    Button(
-                        onClick = onTestShowAd,
-                        enabled = adLoadState is AdLoadState.Ready,
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = CyberSecondary,
-                            disabledContainerColor = CyberOutline
-                        ),
-                        shape = RoundedCornerShape(12.dp),
-                        modifier = Modifier
-                            .weight(1f)
-                            .height(48.dp)
-                            .testTag("test_show_ad_button")
-                    ) {
-                        Text(
-                            text = "2. Exibir",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = CyberBackground,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-                }
-                Spacer(modifier = Modifier.height(8.dp))
-                Text(
-                    text = "A ligação VPN só é iniciada após exibir e fechar um anúncio válido do Google AdMob. Ao publicar na Google Play Store, basta substituir o seu App ID e Bloco de Anúncios de produção.",
-                    style = MaterialTheme.typography.bodySmall,
                     color = CyberTextMuted
                 )
             }

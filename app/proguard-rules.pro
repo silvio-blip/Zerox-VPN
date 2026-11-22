@@ -20,7 +20,8 @@
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
 
-# Start.io (StartApp) SDK rules for release builds with minification enabled
--keep class com.startapp.** { *; }
--keepattributes Exceptions,InnerClasses,Signature,Deprecated,SourceFile,LineNumberTable,*Annotation*,EnclosingMethod
--dontwarn com.startapp.**
+# Google Mobile Ads (AdMob) SDK ProGuard rules
+-keep class com.google.android.gms.ads.** { *; }
+-keep interface com.google.android.gms.ads.** { *; }
+-dontwarn com.google.android.gms.ads.**
+

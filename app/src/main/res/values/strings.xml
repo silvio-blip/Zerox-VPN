@@ -1,3 +1,11 @@
 <resources>
     <string name="app_name">Zerox VPN</string>
+
+    <!--
+        GOOGLE ADMOB — IDS REAIS DE PRODUÇÃO (CONFIGURADOS)
+        App ID: ca-app-pub-6932127476232839~4982913996
+        Rewarded Ad Unit ID: ca-app-pub-6932127476232839/1397350216
+    -->
+    <string name="admob_app_id">ca-app-pub-6932127476232839~4982913996</string>
+    <string name="admob_rewarded_ad_unit_id">ca-app-pub-6932127476232839/1397350216</string>
 </resources>

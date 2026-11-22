@@ -9,8 +9,6 @@ import com.google.android.gms.ads.AdError
 import com.google.android.gms.ads.FullScreenContentCallback
 import com.google.android.gms.ads.LoadAdError
 import com.google.android.gms.ads.MobileAds
-import com.google.android.gms.ads.interstitial.InterstitialAd
-import com.google.android.gms.ads.interstitial.InterstitialAdLoadCallback
 import com.google.android.gms.ads.rewarded.RewardedAd
 import com.google.android.gms.ads.rewarded.RewardedAdLoadCallback
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -27,20 +25,17 @@ sealed class AdLoadState {
 }
 
 /**
- * Gestor do Google Mobile Ads (AdMob).
- * Exibe anúncios Recompensados (Rewarded) ou Intersticiais antes de permitir a conexão VPN.
- * A conexão só é permitida após a exibição e fechamento do anúncio.
+ * Gestor oficial do Google Mobile Ads (AdMob) em MODO DE PRODUÇÃO EXCLUSIVO.
+ * Utiliza o formato Recompensado (Rewarded) configurado.
  */
 object RewardedAdManager {
     private const val TAG = "AdMobDebug"
 
     // =========================================================================
-    // GOOGLE ADMOB — CONFIGURAÇÃO DE PRODUÇÃO E IDs DE BLOCO DE ANÚNCIOS
-    // (Substitua pelos IDs reais gerados no Google AdMob Console ao publicar)
+    // GOOGLE ADMOB — IDS REAIS DE PRODUÇÃO
     // =========================================================================
-    const val ADMOB_APP_ID = "ca-app-pub-3940256099942544~3347511713"
-    const val ADMOB_REWARDED_AD_UNIT_ID = "ca-app-pub-3940256099942544/5224354917"
-    const val ADMOB_INTERSTITIAL_AD_UNIT_ID = "ca-app-pub-3940256099942544/1033173712"
+    const val ADMOB_APP_ID = "ca-app-pub-6932127476232839~4982913996"
+    const val ADMOB_REWARDED_AD_UNIT_ID = "ca-app-pub-6932127476232839/1397350216"
 
     private const val PRELOAD_RETRY_COOLDOWN_MS = 15_000L
     private const val IN_FLIGHT_WAIT_TIMEOUT_MS = 6_000L
@@ -53,9 +48,6 @@ object RewardedAdManager {
 
     @Volatile
     private var cachedRewardedAd: RewardedAd? = null
-
-    @Volatile
-    private var cachedInterstitialAd: InterstitialAd? = null
 
     @Volatile
     private var activityRef: WeakReference<Activity>? = null
@@ -75,23 +67,23 @@ object RewardedAdManager {
     private var activeLoadCallbacks: Pair<(() -> Unit)?, ((String) -> Unit)?>? = null
     private var pendingWaitTimeoutRunnable: Runnable? = null
 
-    fun isConfigured(): Boolean = ADMOB_REWARDED_AD_UNIT_ID.isNotBlank()
+    fun isConfigured(): Boolean {
+        return ADMOB_REWARDED_AD_UNIT_ID.isNotBlank() &&
+            !ADMOB_REWARDED_AD_UNIT_ID.contains("SUBSTITUIR") &&
+            !ADMOB_REWARDED_AD_UNIT_ID.contains("3940256099942544")
+    }
 
     fun updateActivity(activity: Activity) {
         activityRef = WeakReference(activity)
     }
 
     fun isAdReady(): Boolean {
-        return cachedRewardedAd != null || cachedInterstitialAd != null
+        return cachedRewardedAd != null
     }
 
-    /**
-     * Descarta os anúncios em cache (por exemplo, quando o usuário altera o consentimento).
-     */
     fun invalidateCachedAd() {
         runOnMainThread {
             cachedRewardedAd = null
-            cachedInterstitialAd = null
             lastErrorDetail = null
             lastAttemptTimestampMs = 0L
             cancelPendingWaitTimeout()
@@ -103,9 +95,6 @@ object RewardedAdManager {
         }
     }
 
-    /**
-     * Inicializa o Google Mobile Ads SDK no arranque do app.
-     */
     fun initializeSdk(context: Context, onReady: (() -> Unit)? = null) {
         if (context is Activity) {
             activityRef = WeakReference(context)
@@ -126,8 +115,16 @@ object RewardedAdManager {
                 return@runOnMainThread
             }
 
+            if (!isConfigured()) {
+                val msg = "IDs de produção do AdMob pendentes ou inválidos."
+                lastErrorDetail = msg
+                _adState.value = AdLoadState.Error(msg)
+                Log.w(TAG, "[Init] $msg")
+                return@runOnMainThread
+            }
+
             try {
-                Log.i(TAG, "[Init] Inicializando Google Mobile Ads SDK...")
+                Log.i(TAG, "[Init] Inicializando Google Mobile Ads SDK em modo de produção (Rewarded)...")
                 MobileAds.initialize(appContext) { initStatus ->
                     runOnMainThread {
                         _sdkInitialized.value = true
@@ -149,9 +146,6 @@ object RewardedAdManager {
         }
     }
 
-    /**
-     * Pré-carrega um anúncio silenciosamente em segundo plano.
-     */
     fun preloadSilently(context: Context, force: Boolean = false) {
         if (context is Activity) {
             activityRef = WeakReference(context)
@@ -169,9 +163,6 @@ object RewardedAdManager {
         }
     }
 
-    /**
-     * Carrega um anúncio Recompensado (ou Intersticial) do AdMob em cache.
-     */
     fun loadAd(
         context: Context,
         onLoaded: (() -> Unit)? = null,
@@ -184,7 +175,7 @@ object RewardedAdManager {
 
         runOnMainThread {
             if (!isConfigured()) {
-                val err = "ADMOB_AD_UNIT_ID_MISSING"
+                val err = "AdMob em modo de produção: IDs inválidos ou não configurados."
                 lastErrorDetail = err
                 _adState.value = AdLoadState.Error(err)
                 onFailed?.invoke(err)
@@ -199,7 +190,7 @@ object RewardedAdManager {
             }
 
             if (isAdReady()) {
-                Log.i(TAG, "[Load] Anúncio AdMob já pronto em cache.")
+                Log.i(TAG, "[Load] Anúncio AdMob Recompensado já pronto em cache.")
                 onLoaded?.invoke()
                 return@runOnMainThread
             }
@@ -209,13 +200,12 @@ object RewardedAdManager {
             }
 
             if (!isLoading.compareAndSet(false, true)) {
-                Log.d(TAG, "[Load] Carregamento AdMob já em andamento; registrando callbacks.")
+                Log.d(TAG, "[Load] Carregamento AdMob já em andamento.")
                 return@runOnMainThread
             }
 
             lastAttemptTimestampMs = System.currentTimeMillis()
             cachedRewardedAd = null
-            cachedInterstitialAd = null
             lastErrorDetail = null
             _adState.value = AdLoadState.Loading("AdMob Recompensado")
 
@@ -244,12 +234,16 @@ object RewardedAdManager {
 
                         override fun onAdFailedToLoad(loadAdError: LoadAdError) {
                             runOnMainThread {
-                                Log.w(
-                                    TAG,
-                                    "[Load] RewardedAd falhou (código ${loadAdError.code}: ${loadAdError.message}). Tentando Intersticial de suporte..."
-                                )
-                                // Tenta carregar Interstitial como plano secundário para garantir que sempre haja anúncio
-                                loadFallbackInterstitial(appContext)
+                                cancelPendingWaitTimeout()
+                                val reason = "Código ${loadAdError.code}: ${loadAdError.message}"
+                                cachedRewardedAd = null
+                                lastErrorDetail = reason
+                                isLoading.set(false)
+                                _adState.value = AdLoadState.Error(reason)
+                                Log.e(TAG, "[Load] RewardedAd falhou: $reason")
+                                val cb = activeLoadCallbacks
+                                activeLoadCallbacks = null
+                                cb?.second?.invoke(reason)
                             }
                         }
                     }
@@ -259,7 +253,6 @@ object RewardedAdManager {
                     cancelPendingWaitTimeout()
                     val reason = "${e.javaClass.simpleName}: ${e.message}"
                     cachedRewardedAd = null
-                    cachedInterstitialAd = null
                     lastErrorDetail = reason
                     isLoading.set(false)
                     _adState.value = AdLoadState.Error(reason)
@@ -272,51 +265,6 @@ object RewardedAdManager {
         }
     }
 
-    private fun loadFallbackInterstitial(appContext: Context) {
-        val adRequest = AdConsentManager.buildAdRequest(appContext)
-        InterstitialAd.load(
-            appContext,
-            ADMOB_INTERSTITIAL_AD_UNIT_ID,
-            adRequest,
-            object : InterstitialAdLoadCallback() {
-                override fun onAdLoaded(interstitialAd: InterstitialAd) {
-                    runOnMainThread {
-                        cancelPendingWaitTimeout()
-                        cachedInterstitialAd = interstitialAd
-                        lastErrorDetail = null
-                        isLoading.set(false)
-                        _adState.value = AdLoadState.Ready("AdMob Intersticial Pronto")
-                        Log.i(TAG, "[Load] InterstitialAd carregado com sucesso como fallback.")
-                        val cb = activeLoadCallbacks
-                        activeLoadCallbacks = null
-                        cb?.first?.invoke()
-                    }
-                }
-
-                override fun onAdFailedToLoad(loadAdError: LoadAdError) {
-                    runOnMainThread {
-                        cancelPendingWaitTimeout()
-                        val reason = "Código ${loadAdError.code}: ${loadAdError.message}"
-                        cachedRewardedAd = null
-                        cachedInterstitialAd = null
-                        lastErrorDetail = reason
-                        isLoading.set(false)
-                        _adState.value = AdLoadState.Error(reason)
-                        Log.e(TAG, "[Load] Fallback Intersticial também falhou: $reason")
-                        val cb = activeLoadCallbacks
-                        activeLoadCallbacks = null
-                        cb?.second?.invoke(reason)
-                    }
-                }
-            }
-        )
-    }
-
-    /**
-     * Fluxo OBRIGATÓRIO ao tocar em CONECTAR-SE:
-     * - Se houver anúncio pronto em cache: exibe e só conecta a VPN após o fechamento (adDismissed).
-     * - Se não houver: aguarda até ~6s pelo carregamento em curso; se carregar, exibe; se falhar, BLOQUEIA a VPN.
-     */
     fun showRequiredAdOrBlock(
         activity: Activity,
         onAdClosedConnectVpn: () -> Unit,
@@ -324,16 +272,16 @@ object RewardedAdManager {
     ) {
         activityRef = WeakReference(activity)
         runOnMainThread {
-            val rewarded = cachedRewardedAd
-            val interstitial = cachedInterstitialAd
-
-            if (rewarded != null) {
-                displayMandatoryRewardedAd(activity, rewarded, onAdClosedConnectVpn, onBlocked)
+            if (!isConfigured()) {
+                val msg = "Modo de Produção: configure os IDs reais do Google AdMob."
+                Log.w(TAG, "[Connect] $msg")
+                onBlocked(msg)
                 return@runOnMainThread
             }
 
-            if (interstitial != null) {
-                displayMandatoryInterstitialAd(activity, interstitial, onAdClosedConnectVpn, onBlocked)
+            val rewarded = cachedRewardedAd
+            if (rewarded != null) {
+                displayMandatoryRewardedAd(activity, rewarded, onAdClosedConnectVpn, onBlocked)
                 return@runOnMainThread
             }
 
@@ -351,14 +299,11 @@ object RewardedAdManager {
                     cancelPendingWaitTimeout()
                     if (activity.isFinishing || activity.isDestroyed) return@loadAd
                     val readyRewarded = cachedRewardedAd
-                    val readyInterstitial = cachedInterstitialAd
-                    when {
-                        readyRewarded != null -> displayMandatoryRewardedAd(activity, readyRewarded, onAdClosedConnectVpn, onBlocked)
-                        readyInterstitial != null -> displayMandatoryInterstitialAd(activity, readyInterstitial, onAdClosedConnectVpn, onBlocked)
-                        else -> {
-                            Log.w(TAG, "[Connect] Anúncio não ficou pronto. Conexão bloqueada.")
-                            onBlocked("Anúncio não carregou a tempo. Tente novamente.")
-                        }
+                    if (readyRewarded != null) {
+                        displayMandatoryRewardedAd(activity, readyRewarded, onAdClosedConnectVpn, onBlocked)
+                    } else {
+                        Log.w(TAG, "[Connect] Anúncio não ficou pronto. Conexão bloqueada.")
+                        onBlocked("Anúncio não carregou a tempo. Tente novamente.")
                     }
                 },
                 onFailed = { detail ->
@@ -371,9 +316,6 @@ object RewardedAdManager {
         }
     }
 
-    /**
-     * Exibição de teste isolada para o botão de diagnóstico na aba Definições.
-     */
     fun showLoadedAd(
         activity: Activity,
         onFinished: (Boolean, String) -> Unit
@@ -381,55 +323,39 @@ object RewardedAdManager {
         activityRef = WeakReference(activity)
         runOnMainThread {
             val rewarded = cachedRewardedAd
-            val interstitial = cachedInterstitialAd
-
-            if (rewarded == null && interstitial == null) {
-                onFinished(false, "Nenhum anúncio em cache. Clique em '1. Carregar' primeiro.")
+            if (rewarded == null) {
+                onFinished(false, "Nenhum anúncio em cache.")
                 return@runOnMainThread
             }
 
+            cachedRewardedAd = null
+            _adState.value = AdLoadState.Idle
             val completed = AtomicBoolean(false)
 
-            if (rewarded != null) {
-                cachedRewardedAd = null
-                _adState.value = AdLoadState.Idle
-                rewarded.fullScreenContentCallback = object : FullScreenContentCallback() {
-                    override fun onAdDismissedFullScreenContent() {
-                        if (completed.compareAndSet(false, true)) {
-                            preloadSilently(activity, force = true)
-                            onFinished(true, "Anúncio Recompensado AdMob exibido e fechado com sucesso.")
-                        }
-                    }
-
-                    override fun onAdFailedToShowFullScreenContent(adError: AdError) {
-                        if (completed.compareAndSet(false, true)) {
-                            preloadSilently(activity, force = true)
-                            onFinished(false, "Falha ao exibir Recompensado: ${adError.message}")
-                        }
+            rewarded.fullScreenContentCallback = object : FullScreenContentCallback() {
+                override fun onAdDismissedFullScreenContent() {
+                    if (completed.compareAndSet(false, true)) {
+                        preloadSilently(activity, force = true)
+                        onFinished(true, "Anúncio Recompensado AdMob exibido e fechado com sucesso.")
                     }
                 }
+
+                override fun onAdFailedToShowFullScreenContent(adError: AdError) {
+                    if (completed.compareAndSet(false, true)) {
+                        preloadSilently(activity, force = true)
+                        onFinished(false, "Falha ao exibir Recompensado: ${adError.message}")
+                    }
+                }
+            }
+
+            try {
                 rewarded.show(activity) { rewardItem ->
                     Log.i(TAG, "[Show] Recompensa concedida: ${rewardItem.amount} ${rewardItem.type}")
                 }
-            } else if (interstitial != null) {
-                cachedInterstitialAd = null
-                _adState.value = AdLoadState.Idle
-                interstitial.fullScreenContentCallback = object : FullScreenContentCallback() {
-                    override fun onAdDismissedFullScreenContent() {
-                        if (completed.compareAndSet(false, true)) {
-                            preloadSilently(activity, force = true)
-                            onFinished(true, "Anúncio Intersticial AdMob exibido e fechado com sucesso.")
-                        }
-                    }
-
-                    override fun onAdFailedToShowFullScreenContent(adError: AdError) {
-                        if (completed.compareAndSet(false, true)) {
-                            preloadSilently(activity, force = true)
-                            onFinished(false, "Falha ao exibir Intersticial: ${adError.message}")
-                        }
-                    }
+            } catch (e: Exception) {
+                if (completed.compareAndSet(false, true)) {
+                    onFinished(false, "Erro ao exibir: ${e.message}")
                 }
-                interstitial.show(activity)
             }
         }
     }
@@ -473,49 +399,6 @@ object RewardedAdManager {
         } catch (e: Exception) {
             if (callbackDelivered.compareAndSet(false, true)) {
                 Log.e(TAG, "[Show] Exceção ao abrir anúncio: ${e.message}", e)
-                preloadSilently(activity, force = true)
-                onBlocked("Não foi possível abrir o anúncio: ${e.message}")
-            }
-        }
-    }
-
-    private fun displayMandatoryInterstitialAd(
-        activity: Activity,
-        interstitial: InterstitialAd,
-        onAdClosedConnectVpn: () -> Unit,
-        onBlocked: (String) -> Unit
-    ) {
-        cachedInterstitialAd = null
-        _adState.value = AdLoadState.Idle
-        val callbackDelivered = AtomicBoolean(false)
-
-        interstitial.fullScreenContentCallback = object : FullScreenContentCallback() {
-            override fun onAdDismissedFullScreenContent() {
-                if (!callbackDelivered.compareAndSet(false, true)) return
-                Log.i(TAG, "[Show] Anúncio Intersticial fechado. Iniciando túnel VPN.")
-                onAdClosedConnectVpn()
-                preloadSilently(activity, force = true)
-            }
-
-            override fun onAdFailedToShowFullScreenContent(adError: AdError) {
-                if (!callbackDelivered.compareAndSet(false, true)) return
-                Log.e(TAG, "[Show] Falha ao renderizar Intersticial: ${adError.message}")
-                lastErrorDetail = adError.message
-                _adState.value = AdLoadState.Error(adError.message)
-                preloadSilently(activity, force = true)
-                onBlocked("Falha ao exibir o anúncio. Por favor, tente novamente.")
-            }
-
-            override fun onAdShowedFullScreenContent() {
-                Log.i(TAG, "[Show] Anúncio Intersticial do AdMob exibido na tela.")
-            }
-        }
-
-        try {
-            interstitial.show(activity)
-        } catch (e: Exception) {
-            if (callbackDelivered.compareAndSet(false, true)) {
-                Log.e(TAG, "[Show] Exceção ao abrir Intersticial: ${e.message}", e)
                 preloadSilently(activity, force = true)
                 onBlocked("Não foi possível abrir o anúncio: ${e.message}")
             }
