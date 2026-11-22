@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# ZEROX VPN - SCRIPT DEFINITIVO DE COMPILAÇÃO E ASSINATURA NO TERMUX (ANDROID)
+# ZEROX VPN -- SCRIPT DEFINITIVO DE COMPILAÇÃO E ASSINATURA NO TERMUX (ANDROID)
 # ==============================================================================
 set -e
 
