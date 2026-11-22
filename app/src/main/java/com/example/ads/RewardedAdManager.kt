@@ -1,320 +1,500 @@
 package com.example.ads
 
-import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
-import android.provider.Settings
 import android.util.Log
-import com.google.android.gms.ads.AdError
-import com.google.android.gms.ads.AdRequest
-import com.google.android.gms.ads.FullScreenContentCallback
-import com.google.android.gms.ads.LoadAdError
-import com.google.android.gms.ads.MobileAds
-import com.google.android.gms.ads.RequestConfiguration
-import com.google.android.gms.ads.rewarded.RewardedAd
-import com.google.android.gms.ads.rewarded.RewardedAdLoadCallback
-import java.security.MessageDigest
+import com.startapp.sdk.adsbase.Ad
+import com.startapp.sdk.adsbase.StartAppAd
+import com.startapp.sdk.adsbase.StartAppSDK
+import com.startapp.sdk.adsbase.adlisteners.AdDisplayListener
+import com.startapp.sdk.adsbase.adlisteners.AdEventListener
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import java.lang.ref.WeakReference
 import java.util.concurrent.atomic.AtomicBoolean
 
-enum class AdMode {
-    PRODUCTION,
-    TEST
+sealed class AdLoadState {
+    data object Idle : AdLoadState()
+    data class Loading(val modeLabel: String) : AdLoadState()
+    data class Ready(val modeLabel: String) : AdLoadState()
+    data class Error(val detail: String) : AdLoadState()
 }
 
 object RewardedAdManager {
-    private const val TAG = "RewardedAdManager"
+    private const val TAG = "StartAppDebug"
 
     // =========================================================================
-    // IDENTIFICADORES DO GOOGLE ADMOB
+    // START.IO — PRODUÇÃO ESTRITA (APP ID: 210992352)
+    // EXIBIÇÃO OBRIGATÓRIA ANTES DE CONECTAR A VPN (SEM FALLBACK DIRETO)
     // =========================================================================
-    const val APP_ID = "ca-app-pub-6932127476232839~4982913996"
-    const val PRODUCTION_AD_UNIT_ID = "ca-app-pub-6932127476232839/1397350216"
-    const val TEST_AD_UNIT_ID = "ca-app-pub-3940256099942544/5224354917"
+    const val STARTIO_APP_ID = "210992352"
+    private const val PRELOAD_RETRY_COOLDOWN_MS = 15_000L
+    private const val IN_FLIGHT_WAIT_TIMEOUT_MS = 4_500L
 
-    // =========================================================================
-    // PARÂMETROS PRINCIPAIS DE CONTROLO DO COMPORTAMENTO
-    // 1. AD_MODE: 'production' | 'test' (Padrão: PRODUCTION)
-    // 2. FALLBACK_TO_TEST_ON_FAIL: true | false (Padrão: true)
-    // =========================================================================
-    var AD_MODE: AdMode = AdMode.PRODUCTION
-    var FALLBACK_TO_TEST_ON_FAIL: Boolean = true
+    private val _adState = MutableStateFlow<AdLoadState>(AdLoadState.Idle)
+    val adState: StateFlow<AdLoadState> = _adState.asStateFlow()
 
-    fun setAdMode(mode: String) {
-        AD_MODE = if (mode.equals("test", ignoreCase = true)) AdMode.TEST else AdMode.PRODUCTION
-        Log.i(TAG, "[AdMob] AD_MODE definido para: $AD_MODE")
-    }
-
-    val activeAdUnitId: String
-        get() = when (AD_MODE) {
-            AdMode.PRODUCTION -> PRODUCTION_AD_UNIT_ID
-            AdMode.TEST -> TEST_AD_UNIT_ID
-        }
+    private val _sdkInitialized = MutableStateFlow(false)
+    val sdkInitialized: StateFlow<Boolean> = _sdkInitialized.asStateFlow()
 
     @Volatile
-    private var rewardedAd: RewardedAd? = null
+    private var cachedAd: StartAppAd? = null
 
     @Volatile
-    private var loadedAdUnitId: String? = null
+    private var activityRef: WeakReference<Activity>? = null
 
     @Volatile
     var lastErrorDetail: String? = null
         private set
 
+    @Volatile
+    private var lastAttemptTimestampMs: Long = 0L
+
+    private val isSdkInitStarted = AtomicBoolean(false)
     private val isLoading = AtomicBoolean(false)
-    private val isInitialized = AtomicBoolean(false)
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val pendingInitCallbacks = mutableListOf<() -> Unit>()
 
-    @SuppressLint("HardwareIds")
-    fun initialize(context: Context) {
-        val appContext = context.applicationContext
-        runOnMainThread {
-            if (isInitialized.compareAndSet(false, true)) {
-                try {
-                    val testDeviceIds = mutableListOf(AdRequest.DEVICE_ID_EMULATOR)
-                    runCatching {
-                        val androidId = Settings.Secure.getString(
-                            appContext.contentResolver,
-                            Settings.Secure.ANDROID_ID
-                        )
-                        if (!androidId.isNullOrBlank()) {
-                            val digest = MessageDigest.getInstance("MD5")
-                                .digest(androidId.toByteArray())
-                            val hash = digest.joinToString("") { "%02X".format(it) }
-                            testDeviceIds.add(hash)
-                        }
-                    }
-                    val configuration = RequestConfiguration.Builder()
-                        .setTestDeviceIds(testDeviceIds)
-                        .build()
-                    MobileAds.setRequestConfiguration(configuration)
+    private var activeLoadCallbacks: Pair<(() -> Unit)?, ((String) -> Unit)?>? = null
+    private var pendingWaitTimeoutRunnable: Runnable? = null
 
-                    Log.i(
-                        TAG,
-                        "[AdMob] Inicializando SDK AdMob -> AD_MODE=$AD_MODE | Bloco inicial=$activeAdUnitId | FALLBACK_TO_TEST_ON_FAIL=$FALLBACK_TO_TEST_ON_FAIL"
-                    )
+    fun isConfigured(): Boolean = STARTIO_APP_ID.isNotBlank()
 
-                    MobileAds.initialize(appContext) { initializationStatus ->
-                        val adapters = initializationStatus.adapterStatusMap.entries.joinToString("; ") { (name, st) ->
-                            "$name=${st.initializationState}"
-                        }
-                        Log.i(TAG, "[AdMob] SDK AdMob inicializado com sucesso. Adaptadores: [$adapters]")
-                        preload(appContext)
-                    }
-                } catch (e: Exception) {
-                    isInitialized.set(false)
-                    val msg = "Erro ao inicializar SDK AdMob: ${e.javaClass.simpleName}: ${e.message}"
-                    lastErrorDetail = msg
-                    Log.e(TAG, "[AdMob] $msg", e)
-                }
-            } else {
-                preload(appContext)
-            }
+    fun updateActivity(activity: Activity) {
+        activityRef = WeakReference(activity)
+    }
+
+    fun isAdReady(): Boolean {
+        val ad = cachedAd ?: return false
+        return try {
+            ad.isReady
+        } catch (_: Exception) {
+            _adState.value is AdLoadState.Ready
         }
     }
 
     /**
-     * Pré-carrega um anúncio premiado no arranque ou logo após cada exibição/falha.
+     * Descarta o anúncio em cache quando o utilizador altera as preferências de consentimento.
      */
-    fun preload(context: Context) {
-        val appContext = context.applicationContext
+    fun invalidateCachedAd() {
         runOnMainThread {
-            if (rewardedAd != null || isLoading.get()) {
-                Log.d(TAG, "[AdMob] preload() ignorado: anúncio já pronto ($loadedAdUnitId) ou carregamento ativo.")
-                return@runOnMainThread
-            }
-            isLoading.set(true)
+            cachedAd = null
             lastErrorDetail = null
-            val targetUnit = activeAdUnitId
-            loadInternal(appContext, targetUnit, allowFallback = (AD_MODE == AdMode.PRODUCTION))
+            lastAttemptTimestampMs = 0L
+            cancelPendingWaitTimeout()
+            activeLoadCallbacks = null
+            if (!isLoading.get()) {
+                _adState.value = AdLoadState.Idle
+            }
+            Log.i(TAG, "[Cache] Cache de anúncio invalidado após atualização de consentimento.")
         }
     }
 
-    private fun loadInternal(
-        appContext: Context,
-        adUnitId: String,
-        allowFallback: Boolean
-    ) {
-        val isTestUnit = (adUnitId == TEST_AD_UNIT_ID)
-        Log.i(
-            TAG,
-            "[AdMob] Carregando anúncio premiado... Bloco: $adUnitId (${if (isTestUnit) "TESTE" else "PRODUÇÃO"}) | AD_MODE: $AD_MODE | Fallback permitido: $allowFallback"
-        )
-        val adRequest = AdRequest.Builder().build()
-        RewardedAd.load(
-            appContext,
-            adUnitId,
-            adRequest,
-            object : RewardedAdLoadCallback() {
-                override fun onAdLoaded(ad: RewardedAd) {
-                    rewardedAd = ad
-                    loadedAdUnitId = adUnitId
-                    lastErrorDetail = null
-                    isLoading.set(false)
-                    Log.i(
-                        TAG,
-                        "[AdMob] Anúncio carregado com SUCESSO! Tipo: ${if (isTestUnit) "TESTE" else "PRODUÇÃO"} | Bloco: $adUnitId"
-                    )
-                }
-
-                override fun onAdFailedToLoad(loadAdError: LoadAdError) {
-                    val detail = buildLoadErrorDetail(adUnitId, loadAdError)
-                    Log.e(
-                        TAG,
-                        "[AdMob] Falha ao carregar anúncio. Bloco: $adUnitId | Código: ${loadAdError.code} | Mensagem: ${loadAdError.message} | Domínio: ${loadAdError.domain}"
-                    )
-
-                    // Se estiver em modo PRODUÇÃO e o bloco de produção falhar (No fill, rede, etc.)
-                    if (AD_MODE == AdMode.PRODUCTION && adUnitId == PRODUCTION_AD_UNIT_ID && allowFallback) {
-                        if (FALLBACK_TO_TEST_ON_FAIL) {
-                            Log.w(
-                                TAG,
-                                "[AdMob] Bloco de produção sem inventário (${loadAdError.code}: ${loadAdError.message}). FALLBACK_TO_TEST_ON_FAIL=true -> Alternando automaticamente para o bloco de teste oficial ($TEST_AD_UNIT_ID)..."
-                            )
-                            loadInternal(appContext, TEST_AD_UNIT_ID, allowFallback = false)
-                            return
-                        } else {
-                            Log.w(
-                                TAG,
-                                "[AdMob] Bloco de produção falhou e FALLBACK_TO_TEST_ON_FAIL=false. Nenhuma contingência será solicitada."
-                            )
-                        }
-                    }
-
-                    rewardedAd = null
-                    loadedAdUnitId = null
-                    lastErrorDetail = detail
-                    isLoading.set(false)
-                }
-            }
-        )
-    }
-
-    fun isAdAvailable(): Boolean = rewardedAd != null
-
     /**
-     * Exibe o anúncio premiado pré-carregado ou aguarda até 10 segundos pelo carregamento sem travar o botão.
+     * Inicializa o SDK Start.io imediatamente no arranque (Application/MainActivity).
+     * Garante que initParams(appId) seja registrado antes de qualquer chamada a setUserConsent().
      */
-    fun showOrWaitAndReport(
-        activity: Activity,
-        onRewardEarned: () -> Unit,
-        onDismissedWithoutReward: () -> Unit,
-        onAdUnavailable: (errorDetail: String) -> Unit
-    ) {
+    fun initializeSdk(context: Context, onReady: (() -> Unit)? = null) {
+        if (context is Activity) {
+            activityRef = WeakReference(context)
+        }
+        val appContext = context.applicationContext
+
         runOnMainThread {
-            val current = rewardedAd
-            if (current != null) {
-                displayLoadedAd(activity, current, onRewardEarned, onDismissedWithoutReward, onAdUnavailable)
+            if (!isConfigured()) {
+                val err = "STARTIO_APP_ID_MISSING"
+                lastErrorDetail = err
+                _adState.value = AdLoadState.Error(err)
+                Log.e(TAG, "[Init] App ID não configurado.")
                 return@runOnMainThread
             }
 
-            if (!isInitialized.get()) {
-                initialize(activity)
-            } else if (!isLoading.get()) {
-                preload(activity)
+            if (_sdkInitialized.value) {
+                if (AdConsentManager.hasUserMadeChoice(appContext)) {
+                    AdConsentManager.applyToStartIoSdk(appContext)
+                }
+                onReady?.invoke()
+                return@runOnMainThread
             }
 
-            var waitedMs = 0
-            val checkInterval = 200L
-            val maxWaitMs = 10000L
-
-            fun check() {
-                if (activity.isFinishing || activity.isDestroyed) {
-                    return
-                }
-                val ad = rewardedAd
-                if (ad != null) {
-                    displayLoadedAd(activity, ad, onRewardEarned, onDismissedWithoutReward, onAdUnavailable)
-                } else if (!isLoading.get()) {
-                    val detail = lastErrorDetail
-                        ?: "Nenhum anúncio disponível no momento (AD_MODE=$AD_MODE, bloco=$activeAdUnitId)."
-                    Log.w(TAG, "[AdMob] Anúncio indisponível após tentativa de carregamento: $detail")
-                    onAdUnavailable(detail)
-                } else if (waitedMs >= maxWaitMs) {
-                    val detail = lastErrorDetail
-                        ?: "Tempo limite esgotado ao carregar anúncio do AdMob (${maxWaitMs}ms)."
-                    Log.w(TAG, "[AdMob] $detail")
-                    onAdUnavailable(detail)
-                } else {
-                    waitedMs += checkInterval.toInt()
-                    mainHandler.postDelayed({ check() }, checkInterval)
-                }
+            if (onReady != null) {
+                pendingInitCallbacks.add(onReady)
             }
 
-            mainHandler.postDelayed({ check() }, checkInterval)
+            if (!isSdkInitStarted.compareAndSet(false, true)) {
+                return@runOnMainThread
+            }
+
+            try {
+                Log.i(TAG, "[Init] Inicializando Start.io SDK (App ID: $STARTIO_APP_ID | Pacote: ${appContext.packageName})...")
+                StartAppSDK.setTestAdsEnabled(false)
+                StartAppSDK.enableReturnAds(false)
+                StartAppSDK.enableConsent(appContext, false)
+                StartAppAd.disableSplash()
+                StartAppAd.disableAutoInterstitial()
+
+                StartAppSDK.initParams(appContext, STARTIO_APP_ID)
+                    .setCallback {
+                        runOnMainThread {
+                            _sdkInitialized.value = true
+                            if (AdConsentManager.hasUserMadeChoice(appContext)) {
+                                AdConsentManager.applyToStartIoSdk(appContext)
+                            }
+                            Log.i(TAG, "[Init] Start.io SDK inicializado com sucesso (App ID: $STARTIO_APP_ID | Pacote: ${appContext.packageName}).")
+                            val callbacks = pendingInitCallbacks.toList()
+                            pendingInitCallbacks.clear()
+                            callbacks.forEach { it.invoke() }
+                        }
+                    }
+                    .init()
+            } catch (e: Exception) {
+                isSdkInitStarted.set(false)
+                _sdkInitialized.value = false
+                val msg = "Erro ao inicializar Start.io SDK: ${e.javaClass.simpleName}: ${e.message}"
+                lastErrorDetail = msg
+                _adState.value = AdLoadState.Error(msg)
+                pendingInitCallbacks.clear()
+                Log.e(TAG, "[Init] $msg", e)
+            }
         }
     }
 
-    private fun displayLoadedAd(
-        activity: Activity,
-        ad: RewardedAd,
-        onRewardEarned: () -> Unit,
-        onDismissedWithoutReward: () -> Unit,
-        onAdUnavailable: (errorDetail: String) -> Unit
-    ) {
-        var userEarnedReward = false
-        val currentAdUnit = loadedAdUnitId ?: activeAdUnitId
-        val isTest = (currentAdUnit == TEST_AD_UNIT_ID)
+    /**
+     * Pré-carrega um anúncio silenciosamente após consentimento, no onResume ou após exibição.
+     */
+    fun preloadSilently(context: Context, force: Boolean = false) {
+        if (context is Activity) {
+            activityRef = WeakReference(context)
+        }
+        val appContext = context.applicationContext
+        runOnMainThread {
+            if (!isConfigured() || isAdReady() || isLoading.get()) {
+                return@runOnMainThread
+            }
+            if (!AdConsentManager.hasUserMadeChoice(appContext)) {
+                return@runOnMainThread
+            }
+            val now = System.currentTimeMillis()
+            if (!force && lastErrorDetail != null && (now - lastAttemptTimestampMs) < PRELOAD_RETRY_COOLDOWN_MS) {
+                return@runOnMainThread
+            }
+            loadAd(context = appContext, onLoaded = null, onFailed = null)
+        }
+    }
 
-        ad.fullScreenContentCallback = object : FullScreenContentCallback() {
-            override fun onAdDismissedFullScreenContent() {
-                Log.i(TAG, "[AdMob] Anúncio fechado pelo utilizador. Recompensa obtida: $userEarnedReward (Bloco: $currentAdUnit)")
-                rewardedAd = null
-                loadedAdUnitId = null
-                preload(activity)
-                if (userEarnedReward) {
-                    onRewardEarned()
-                } else {
-                    onDismissedWithoutReward()
+    /**
+     * Carrega o anúncio (StartAppAd.loadAd()) em cache para uso obrigatório no clique de conexão.
+     */
+    fun loadAd(
+        context: Context,
+        onLoaded: (() -> Unit)? = null,
+        onFailed: ((String) -> Unit)? = null
+    ) {
+        if (context is Activity) {
+            activityRef = WeakReference(context)
+        }
+        val appContext = context.applicationContext
+
+        runOnMainThread {
+            if (!isConfigured()) {
+                val err = "STARTIO_APP_ID_MISSING"
+                lastErrorDetail = err
+                _adState.value = AdLoadState.Error(err)
+                onFailed?.invoke(err)
+                return@runOnMainThread
+            }
+
+            if (!_sdkInitialized.value) {
+                initializeSdk(appContext) {
+                    loadAd(appContext, onLoaded, onFailed)
+                }
+                return@runOnMainThread
+            }
+
+            if (isAdReady()) {
+                Log.i(TAG, "[Load] Anúncio já carregado e pronto em cache.")
+                onLoaded?.invoke()
+                return@runOnMainThread
+            }
+
+            if (onLoaded != null || onFailed != null) {
+                activeLoadCallbacks = Pair(onLoaded, onFailed)
+            }
+
+            if (!isLoading.compareAndSet(false, true)) {
+                Log.d(TAG, "[Load] Carregamento de anúncio já em andamento; acoplando callback.")
+                return@runOnMainThread
+            }
+
+            lastAttemptTimestampMs = System.currentTimeMillis()
+            cachedAd = null
+            lastErrorDetail = null
+            _adState.value = AdLoadState.Loading("AUTOMATIC")
+
+            try {
+                if (AdConsentManager.hasUserMadeChoice(appContext)) {
+                    AdConsentManager.applyToStartIoSdk(appContext)
+                }
+                val adContext = resolveAdContext(appContext)
+                val startAppAd = StartAppAd(adContext)
+                Log.i(
+                    TAG,
+                    "[Load] Carregando anúncio Start.io (context=${adContext::class.java.simpleName}, " +
+                        "appId=$STARTIO_APP_ID, pkg=${appContext.packageName})..."
+                )
+
+                startAppAd.loadAd(object : AdEventListener {
+                    override fun onReceiveAd(ad: Ad) {
+                        runOnMainThread {
+                            cancelPendingWaitTimeout()
+                            cachedAd = startAppAd
+                            lastErrorDetail = null
+                            isLoading.set(false)
+                            _adState.value = AdLoadState.Ready("Start.io Pronto")
+                            Log.i(TAG, "[Load] onReceiveAd: anúncio pronto para exibição obrigatória.")
+                            val cb = activeLoadCallbacks
+                            activeLoadCallbacks = null
+                            cb?.first?.invoke()
+                        }
+                    }
+
+                    override fun onFailedToReceiveAd(ad: Ad?) {
+                        runOnMainThread {
+                            cancelPendingWaitTimeout()
+                            val rawMessage = ad?.errorMessage?.takeIf { it.isNotBlank() } ?: "NO FILL"
+                            val reason = if (rawMessage.contains("status=404", ignoreCase = true) ||
+                                rawMessage.contains("404", ignoreCase = true)
+                            ) {
+                                "$rawMessage [Verifique no portal.start.io se App ID $STARTIO_APP_ID pertence ao pacote ${appContext.packageName}]"
+                            } else {
+                                rawMessage
+                            }
+                            cachedAd = null
+                            lastErrorDetail = reason
+                            isLoading.set(false)
+                            _adState.value = AdLoadState.Error(reason)
+                            Log.e(
+                                TAG,
+                                "[Load] Erro ao carregar anúncio (appId=$STARTIO_APP_ID, pkg=${appContext.packageName}): $rawMessage"
+                            )
+                            val cb = activeLoadCallbacks
+                            activeLoadCallbacks = null
+                            cb?.second?.invoke(reason)
+                        }
+                    }
+                })
+            } catch (e: Exception) {
+                runOnMainThread {
+                    cancelPendingWaitTimeout()
+                    val reason = "${e.javaClass.simpleName}: ${e.message}"
+                    cachedAd = null
+                    lastErrorDetail = reason
+                    isLoading.set(false)
+                    _adState.value = AdLoadState.Error(reason)
+                    Log.e(TAG, "[Load] Exceção ao carregar anúncio: $reason", e)
+                    val cb = activeLoadCallbacks
+                    activeLoadCallbacks = null
+                    cb?.second?.invoke(reason)
                 }
             }
+        }
+    }
 
-            override fun onAdFailedToShowFullScreenContent(adError: AdError) {
-                val detail = "Erro ao exibir anúncio (Código ${adError.code} / ${adError.domain}): ${adError.message}"
-                Log.e(TAG, "[AdMob] Falha na exibição: $detail")
-                rewardedAd = null
-                loadedAdUnitId = null
-                lastErrorDetail = detail
-                preload(activity)
-                onAdUnavailable(detail)
+    /**
+     * Fluxo obrigatório do botão "CONECTAR-SE":
+     * - Se `startAppAd.isReady()`: exibe imediatamente e só chama `onAdClosedConnectVpn()` em `adHidden`.
+     * - Se já houver carregamento em curso (ou ao iniciar novo pedido), aguarda até ~4,5s pelo
+     *   término do pedido atual antes de abortar; se falhar ou estourar o tempo, BLOQUEIA a VPN.
+     */
+    fun showRequiredAdOrBlock(
+        activity: Activity,
+        onAdClosedConnectVpn: () -> Unit,
+        onBlocked: (String) -> Unit
+    ) {
+        activityRef = WeakReference(activity)
+        runOnMainThread {
+            val ad = cachedAd
+            val ready = try {
+                ad != null && ad.isReady
+            } catch (_: Exception) {
+                false
             }
 
-            override fun onAdShowedFullScreenContent() {
-                Log.i(TAG, "[AdMob] Anúncio em exibição na tela. Tipo: ${if (isTest) "TESTE" else "PRODUÇÃO"} | Bloco: $currentAdUnit")
+            if (ad != null && ready) {
+                displayMandatoryAd(activity, ad, onAdClosedConnectVpn, onBlocked)
+                return@runOnMainThread
+            }
+
+            val wasAlreadyLoading = isLoading.get()
+            Log.i(
+                TAG,
+                if (wasAlreadyLoading) {
+                    "[Connect] Carregamento em curso; aguardando resposta do anúncio (máx ${IN_FLIGHT_WAIT_TIMEOUT_MS}ms)..."
+                } else {
+                    "[Connect] Sem anúncio em cache; solicitando carregamento obrigatório antes de conectar..."
+                }
+            )
+
+            scheduleWaitTimeout {
+                if (activity.isFinishing || activity.isDestroyed) return@scheduleWaitTimeout
+                activeLoadCallbacks = null
+                Log.w(TAG, "Tempo limite ao aguardar anúncio. A conexão VPN está bloqueada.")
+                onBlocked("Anúncio indisponível no momento. Aguarde um momento e tente novamente.")
+            }
+
+            loadAd(
+                context = activity,
+                onLoaded = {
+                    cancelPendingWaitTimeout()
+                    if (activity.isFinishing || activity.isDestroyed) return@loadAd
+                    val readyAd = cachedAd
+                    if (readyAd != null && isAdReady()) {
+                        displayMandatoryAd(activity, readyAd, onAdClosedConnectVpn, onBlocked)
+                    } else {
+                        Log.w(TAG, "Anúncio indisponível após carregamento. A conexão VPN está bloqueada.")
+                        onBlocked("Anúncio não ficou pronto para exibição. Tente novamente.")
+                    }
+                },
+                onFailed = { detail ->
+                    cancelPendingWaitTimeout()
+                    if (activity.isFinishing || activity.isDestroyed) return@loadAd
+                    Log.w(TAG, "Anúncio indisponível ($detail). A conexão VPN está bloqueada.")
+                    onBlocked("Anúncio indisponível no momento ($detail). Aguarde um momento e tente novamente.")
+                }
+            )
+        }
+    }
+
+    /**
+     * Exibição isolada para o botão de diagnóstico nas Definições.
+     */
+    fun showLoadedAd(
+        activity: Activity,
+        onFinished: (Boolean, String) -> Unit
+    ) {
+        activityRef = WeakReference(activity)
+        runOnMainThread {
+            val ad = cachedAd
+            if (ad == null || !isAdReady()) {
+                onFinished(false, "Nenhum anúncio em cache. Use '1. Carregar' primeiro.")
+                return@runOnMainThread
+            }
+
+            cachedAd = null
+            _adState.value = AdLoadState.Idle
+            val completed = AtomicBoolean(false)
+
+            try {
+                val shown = ad.showAd(object : AdDisplayListener {
+                    override fun adHidden(hiddenAd: Ad) {
+                        if (completed.compareAndSet(false, true)) {
+                            preloadSilently(activity, force = true)
+                            onFinished(true, "Anúncio exibido e fechado com sucesso.")
+                        }
+                    }
+
+                    override fun adDisplayed(displayedAd: Ad) {
+                        Log.i(TAG, "[Show] Anúncio visível.")
+                    }
+
+                    override fun adClicked(clickedAd: Ad) {
+                        Log.d(TAG, "[Show] Anúncio clicado.")
+                    }
+
+                    override fun adNotDisplayed(notDisplayedAd: Ad) {
+                        if (completed.compareAndSet(false, true)) {
+                            val reason = notDisplayedAd.errorMessage ?: "Falha ao exibir o anúncio."
+                            preloadSilently(activity, force = true)
+                            onFinished(false, reason)
+                        }
+                    }
+                })
+
+                if (!shown && completed.compareAndSet(false, true)) {
+                    preloadSilently(activity, force = true)
+                    onFinished(false, "Não foi possível abrir o anúncio.")
+                }
+            } catch (e: Exception) {
+                if (completed.compareAndSet(false, true)) {
+                    onFinished(false, "Erro ao exibir: ${e.message}")
+                }
             }
         }
+    }
+
+    private fun displayMandatoryAd(
+        activity: Activity,
+        ad: StartAppAd,
+        onAdClosedConnectVpn: () -> Unit,
+        onBlocked: (String) -> Unit
+    ) {
+        cachedAd = null
+        _adState.value = AdLoadState.Idle
+        val callbackDelivered = AtomicBoolean(false)
 
         try {
-            ad.show(activity) { rewardItem ->
-                Log.i(TAG, "[AdMob] Recompensa confirmada pelo SDK AdMob (${rewardItem.amount} ${rewardItem.type}). Liberando conexão VPN direta!")
-                userEarnedReward = true
+            val shown = ad.showAd(object : AdDisplayListener {
+                override fun adHidden(hiddenAd: Ad) {
+                    if (!callbackDelivered.compareAndSet(false, true)) return
+                    Log.i(TAG, "[Show] adHidden — usuário fechou o anúncio. Iniciando conexão VPN.")
+                    onAdClosedConnectVpn()
+                    preloadSilently(activity, force = true)
+                }
+
+                override fun adDisplayed(displayedAd: Ad) {
+                    Log.i(TAG, "[Show] adDisplayed — anúncio visível na tela.")
+                }
+
+                override fun adClicked(clickedAd: Ad) {
+                    Log.d(TAG, "[Show] adClicked — anúncio clicado.")
+                }
+
+                override fun adNotDisplayed(notDisplayedAd: Ad) {
+                    if (!callbackDelivered.compareAndSet(false, true)) return
+                    val reason = notDisplayedAd.errorMessage?.takeIf { it.isNotBlank() } ?: "Falha ao renderizar"
+                    Log.e(TAG, "Falha ao exibir o anúncio ($reason). A conexão foi abortada por segurança.")
+                    lastErrorDetail = reason
+                    _adState.value = AdLoadState.Error(reason)
+                    preloadSilently(activity, force = true)
+                    onBlocked("Falha ao exibir o anúncio. Por favor, tente novamente.")
+                }
+            })
+
+            if (!shown && callbackDelivered.compareAndSet(false, true)) {
+                Log.e(TAG, "Falha ao exibir o anúncio (showAd=false). A conexão foi abortada por segurança.")
+                preloadSilently(activity, force = true)
+                onBlocked("Não foi possível exibir o anúncio. Por favor, tente novamente.")
             }
         } catch (e: Exception) {
-            val detail = "Exceção ao chamar show(): ${e.javaClass.simpleName}: ${e.message}"
-            Log.e(TAG, "[AdMob] $detail", e)
-            rewardedAd = null
-            loadedAdUnitId = null
-            lastErrorDetail = detail
-            preload(activity)
-            onAdUnavailable(detail)
+            if (callbackDelivered.compareAndSet(false, true)) {
+                Log.e(TAG, "Exceção ao exibir o anúncio (${e.message}). Conexão abortada.", e)
+                preloadSilently(activity, force = true)
+                onBlocked("Erro ao exibir o anúncio. Tente novamente.")
+            }
         }
     }
 
-    private fun buildLoadErrorDetail(adUnitId: String, error: LoadAdError): String {
-        val codeLabel = when (error.code) {
-            AdRequest.ERROR_CODE_INTERNAL_ERROR -> "INTERNAL_ERROR"
-            AdRequest.ERROR_CODE_INVALID_REQUEST -> "INVALID_REQUEST"
-            AdRequest.ERROR_CODE_NETWORK_ERROR -> "NETWORK_ERROR"
-            AdRequest.ERROR_CODE_NO_FILL -> "NO_FILL"
-            AdRequest.ERROR_CODE_APP_ID_MISSING -> "APP_ID_MISSING"
-            else -> "CODE_${error.code}"
+    private fun scheduleWaitTimeout(onTimeout: () -> Unit) {
+        cancelPendingWaitTimeout()
+        val runnable = Runnable {
+            pendingWaitTimeoutRunnable = null
+            onTimeout()
         }
-        return "Sem anúncio disponível no AdMob\n" +
-            "• Código: ${error.code} ($codeLabel)\n" +
-            "• Domínio: ${error.domain}\n" +
-            "• Mensagem: ${error.message}\n" +
-            "• Bloco: $adUnitId"
+        pendingWaitTimeoutRunnable = runnable
+        mainHandler.postDelayed(runnable, IN_FLIGHT_WAIT_TIMEOUT_MS)
+    }
+
+    private fun cancelPendingWaitTimeout() {
+        pendingWaitTimeoutRunnable?.let { mainHandler.removeCallbacks(it) }
+        pendingWaitTimeoutRunnable = null
+    }
+
+    private fun resolveAdContext(appContext: Context): Context {
+        val act = activityRef?.get()
+        return if (act != null && !act.isFinishing && !act.isDestroyed) act else appContext
     }
 
     private fun runOnMainThread(block: () -> Unit) {
