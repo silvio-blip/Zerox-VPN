@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# ZEROX VPN - SCRIPT DE COMPILAÇÃO E ASSINATURA PARA O TERMUX (COM ANDROID_HOME)
+# ZEROX VPN - SCRIPT DE COMPILAÇÃO E ASSINATURA PARA O TERMUX
 # ==============================================================================
 set -e
 
@@ -30,34 +30,39 @@ if [ -d "/data/data/com.termux/files/usr/lib/jvm/java-17-openjdk" ]; then
     export PATH="$JAVA_HOME/bin:$PATH"
 fi
 
-# Configuração automática do ANDROID_HOME e sdk.dir para o Termux
-if [ -d "$HOME/lib/android-sdk" ]; then
-    export ANDROID_HOME="$HOME/lib/android-sdk"
-elif [ -d "$PREFIX/share/android-sdk" ]; then
-    export ANDROID_HOME="$PREFIX/share/android-sdk"
-else
-    # Tenta detetar se o Termux Android SDK manager está disponível
-    export ANDROID_HOME="$HOME/android-sdk"
+# Detectar SDK do Termux ou criar link adequado
+TERMUX_SDK="/data/data/com.termux/files/usr/share/android-sdk"
+if [ ! -d "$TERMUX_SDK" ] && [ -d "$PREFIX/share/android-sdk" ]; then
+    TERMUX_SDK="$PREFIX/share/android-sdk"
 fi
+export ANDROID_HOME="$TERMUX_SDK"
 
-# Garante que o sdk.dir existe no local.properties para o Gradle encontrar o SDK
+# Escreve o local.properties corretamente para o Gradle encontrar o SDK no Termux
 echo "sdk.dir=$ANDROID_HOME" > local.properties
 
 echo -e "${GREEN}✓ Java: $(java -version 2>&1 | head -n 1)${NC}"
-echo -e "${GREEN}✓ ANDROID_HOME configurado em: $ANDROID_HOME${NC}"
+echo -e "${GREEN}✓ SDK Path: $ANDROID_HOME${NC}"
 
-# 2. Configuração ou Geração da Keystore de Produção (com senha personalizada)
+# 2. Gestão de Senha e Keystore (Gravada em arquivo local seguro para não pedir nunca mais)
 echo -e "\n${YELLOW}[2/5] Configuração da Keystore e Palavra-passe...${NC}"
 KEYSTORE_FILE="${ROOT_DIR}/my-upload-key.jks"
+PASS_FILE="${ROOT_DIR}/.keystore_pass"
 KEY_ALIAS="upload"
 
-if [ ! -f "$KEYSTORE_FILE" ]; then
-    echo -e "${YELLOW}Nenhuma keystore encontrada. Vamos criar a sua chave de assinatura personalizada.${NC}"
-    echo -n "Digite o seu nome (Ex: Silvio K): "
-    read -r OWNER_NAME
-    [ -z "$OWNER_NAME" ] && OWNER_NAME="Zerox VPN"
-
-    echo -n "Digite a palavra-passe (senha) para a sua Keystore: "
+if [ -f "$PASS_FILE" ]; then
+    # Lê a senha salva anteriormente para não perguntar nunca mais
+    STORE_PASS=$(cat "$PASS_FILE")
+    echo -e "${GREEN}✓ Palavra-passe carregada automaticamente da memória com sucesso!${NC}"
+elif [ -f "$KEYSTORE_FILE" ]; then
+    echo -e "${YELLOW}Keystore existente detetada, mas sem senha salva.${NC}"
+    echo -n "Digite a sua palavra-passe da keystore (será lembrada nas próximas vezes): "
+    read -rs STORE_PASS
+    echo ""
+    echo "$STORE_PASS" > "$PASS_FILE"
+    chmod 600 "$PASS_FILE"
+else
+    echo -e "${YELLOW}Criando nova keystore permanente (my-upload-key.jks)...${NC}"
+    echo -n "Digite uma NOVA palavra-passe para a sua Keystore: "
     read -rs STORE_PASS
     echo ""
     echo -n "Confirme a palavra-passe: "
@@ -69,9 +74,9 @@ if [ ! -f "$KEYSTORE_FILE" ]; then
         exit 1
     fi
     
-    KEY_PASS="$STORE_PASS"
+    echo "$STORE_PASS" > "$PASS_FILE"
+    chmod 600 "$PASS_FILE"
 
-    echo -e "${YELLOW}Criando a sua Keystore em: $KEYSTORE_FILE ...${NC}"
     keytool -genkeypair -v \
         -keystore "$KEYSTORE_FILE" \
         -alias "$KEY_ALIAS" \
@@ -79,18 +84,13 @@ if [ ! -f "$KEYSTORE_FILE" ]; then
         -keysize 2048 \
         -validity 10000 \
         -storepass "$STORE_PASS" \
-        -keypass "$KEY_PASS" \
-        -dname "CN=$OWNER_NAME, OU=Development, O=Zerox, L=Luanda, ST=Luanda, C=AO"
+        -keypass "$STORE_PASS" \
+        -dname "CN=Zerox VPN, OU=Development, O=Zerox, L=Luanda, ST=Luanda, C=AO"
     
     echo -e "${GREEN}✓ Keystore criada com sucesso!${NC}"
-else
-    echo -e "${GREEN}✓ Keystore existente detetada em: $KEYSTORE_FILE${NC}"
-    echo -n "Digite a sua palavra-passe da keystore: "
-    read -rs STORE_PASS
-    echo ""
-    KEY_PASS="$STORE_PASS"
 fi
 
+KEY_PASS="$STORE_PASS"
 export KEYSTORE_PATH="$KEYSTORE_FILE"
 export STORE_PASSWORD="$STORE_PASS"
 export KEY_PASSWORD="$KEY_PASS"
