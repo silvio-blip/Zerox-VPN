@@ -5,12 +5,12 @@ import android.content.Context
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
-import com.google.android.gms.ads.AdError
-import com.google.android.gms.ads.FullScreenContentCallback
-import com.google.android.gms.ads.LoadAdError
-import com.google.android.gms.ads.MobileAds
-import com.google.android.gms.ads.rewarded.RewardedAd
-import com.google.android.gms.ads.rewarded.RewardedAdLoadCallback
+import android.widget.Toast
+import com.startapp.sdk.adsbase.Ad
+import com.startapp.sdk.adsbase.StartAppAd
+import com.startapp.sdk.adsbase.StartAppSDK
+import com.startapp.sdk.adsbase.adlisteners.AdDisplayListener
+import com.startapp.sdk.adsbase.adlisteners.AdEventListener
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -25,20 +25,18 @@ sealed class AdLoadState {
 }
 
 /**
- * Gestor oficial do Google Mobile Ads (AdMob) em MODO DE PRODUÇÃO EXCLUSIVO.
- * Utiliza o formato Recompensado (Rewarded) configurado.
+ * Gestor oficial do Start.io em MODO DE PRODUÇÃO EXCLUSIVO com estratégia de fallback imediato e timeout de 3s.
  */
 object RewardedAdManager {
-    private const val TAG = "AdMobDebug"
+    private const val TAG = "StartIoDebug"
 
     // =========================================================================
-    // GOOGLE ADMOB — IDS REAIS DE PRODUÇÃO
+    // START.IO — APP ID DE PRODUÇÃO
     // =========================================================================
-    const val ADMOB_APP_ID = "ca-app-pub-6932127476232839~4982913996"
-    const val ADMOB_REWARDED_AD_UNIT_ID = "ca-app-pub-6932127476232839/1397350216"
+    const val STARTAPP_APP_ID = "210992352"
 
     private const val PRELOAD_RETRY_COOLDOWN_MS = 15_000L
-    private const val IN_FLIGHT_WAIT_TIMEOUT_MS = 6_000L
+    private const val IN_FLIGHT_WAIT_TIMEOUT_MS = 3_000L // 3 seconds timeout requirement
 
     private val _adState = MutableStateFlow<AdLoadState>(AdLoadState.Idle)
     val adState: StateFlow<AdLoadState> = _adState.asStateFlow()
@@ -47,7 +45,7 @@ object RewardedAdManager {
     val sdkInitialized: StateFlow<Boolean> = _sdkInitialized.asStateFlow()
 
     @Volatile
-    private var cachedRewardedAd: RewardedAd? = null
+    private var cachedRewardedAd: StartAppAd? = null
 
     @Volatile
     private var activityRef: WeakReference<Activity>? = null
@@ -68,9 +66,7 @@ object RewardedAdManager {
     private var pendingWaitTimeoutRunnable: Runnable? = null
 
     fun isConfigured(): Boolean {
-        return ADMOB_REWARDED_AD_UNIT_ID.isNotBlank() &&
-            !ADMOB_REWARDED_AD_UNIT_ID.contains("SUBSTITUIR") &&
-            !ADMOB_REWARDED_AD_UNIT_ID.contains("3940256099942544")
+        return STARTAPP_APP_ID.isNotBlank() && !STARTAPP_APP_ID.contains("SUBSTITUIR")
     }
 
     fun updateActivity(activity: Activity) {
@@ -78,7 +74,8 @@ object RewardedAdManager {
     }
 
     fun isAdReady(): Boolean {
-        return cachedRewardedAd != null
+        val ad = cachedRewardedAd
+        return ad != null && ad.isReady
     }
 
     fun invalidateCachedAd() {
@@ -91,7 +88,7 @@ object RewardedAdManager {
             if (!isLoading.get()) {
                 _adState.value = AdLoadState.Idle
             }
-            Log.i(TAG, "[Cache] Cache de anúncios AdMob invalidado.")
+            Log.i(TAG, "[Cache] Cache de anúncios Start.io invalidado.")
         }
     }
 
@@ -116,7 +113,7 @@ object RewardedAdManager {
             }
 
             if (!isConfigured()) {
-                val msg = "IDs de produção do AdMob pendentes ou inválidos."
+                val msg = "Start.io App ID pendente ou inválido."
                 lastErrorDetail = msg
                 _adState.value = AdLoadState.Error(msg)
                 Log.w(TAG, "[Init] $msg")
@@ -124,20 +121,26 @@ object RewardedAdManager {
             }
 
             try {
-                Log.i(TAG, "[Init] Inicializando Google Mobile Ads SDK em modo de produção (Rewarded)...")
-                MobileAds.initialize(appContext) { initStatus ->
-                    runOnMainThread {
-                        _sdkInitialized.value = true
-                        Log.i(TAG, "[Init] Google Mobile Ads SDK inicializado com sucesso: ${initStatus.adapterStatusMap.keys}")
-                        val callbacks = pendingInitCallbacks.toList()
-                        pendingInitCallbacks.clear()
-                        callbacks.forEach { it.invoke() }
-                    }
+                Log.i(TAG, "[Init] Inicializando Start.io SDK em modo de produção (App ID: $STARTAPP_APP_ID)...")
+                StartAppSDK.init(appContext, STARTAPP_APP_ID, false)
+                val consent = AdConsentManager.syncState(appContext)
+                if (consent.hasUserChoice) {
+                    StartAppSDK.setUserConsent(
+                        appContext,
+                        "pas",
+                        if (consent.consentTimestampMs > 0) consent.consentTimestampMs else System.currentTimeMillis(),
+                        consent.personalizedAdsGranted
+                    )
                 }
+                _sdkInitialized.value = true
+                Log.i(TAG, "[Init] Start.io SDK inicializado com sucesso.")
+                val callbacks = pendingInitCallbacks.toList()
+                pendingInitCallbacks.clear()
+                callbacks.forEach { it.invoke() }
             } catch (e: Exception) {
                 isSdkInitStarted.set(false)
                 _sdkInitialized.value = false
-                val msg = "Erro ao inicializar Google AdMob SDK: ${e.javaClass.simpleName}: ${e.message}"
+                val msg = "Erro ao inicializar Start.io SDK: ${e.javaClass.simpleName}: ${e.message}"
                 lastErrorDetail = msg
                 _adState.value = AdLoadState.Error(msg)
                 pendingInitCallbacks.clear()
@@ -175,7 +178,7 @@ object RewardedAdManager {
 
         runOnMainThread {
             if (!isConfigured()) {
-                val err = "AdMob em modo de produção: IDs inválidos ou não configurados."
+                val err = "Start.io App ID não configurado."
                 lastErrorDetail = err
                 _adState.value = AdLoadState.Error(err)
                 onFailed?.invoke(err)
@@ -190,7 +193,7 @@ object RewardedAdManager {
             }
 
             if (isAdReady()) {
-                Log.i(TAG, "[Load] Anúncio AdMob Recompensado já pronto em cache.")
+                Log.i(TAG, "[Load] Anúncio Start.io Recompensado já pronto em cache.")
                 onLoaded?.invoke()
                 return@runOnMainThread
             }
@@ -200,54 +203,49 @@ object RewardedAdManager {
             }
 
             if (!isLoading.compareAndSet(false, true)) {
-                Log.d(TAG, "[Load] Carregamento AdMob já em andamento.")
+                Log.d(TAG, "[Load] Carregamento Start.io já em andamento.")
                 return@runOnMainThread
             }
 
             lastAttemptTimestampMs = System.currentTimeMillis()
             cachedRewardedAd = null
             lastErrorDetail = null
-            _adState.value = AdLoadState.Loading("AdMob Recompensado")
+            _adState.value = AdLoadState.Loading("Start.io Recompensado")
 
             try {
-                val adRequest = AdConsentManager.buildAdRequest(appContext)
-                Log.i(TAG, "[Load] Solicitando RewardedAd (Unit ID: $ADMOB_REWARDED_AD_UNIT_ID)...")
+                val ad = StartAppAd(appContext)
+                Log.i(TAG, "[Load] Solicitando StartAppAd (REWARDED_VIDEO)...")
 
-                RewardedAd.load(
-                    appContext,
-                    ADMOB_REWARDED_AD_UNIT_ID,
-                    adRequest,
-                    object : RewardedAdLoadCallback() {
-                        override fun onAdLoaded(rewardedAd: RewardedAd) {
-                            runOnMainThread {
-                                cancelPendingWaitTimeout()
-                                cachedRewardedAd = rewardedAd
-                                lastErrorDetail = null
-                                isLoading.set(false)
-                                _adState.value = AdLoadState.Ready("AdMob Recompensado Pronto")
-                                Log.i(TAG, "[Load] RewardedAd carregado com sucesso.")
-                                val cb = activeLoadCallbacks
-                                activeLoadCallbacks = null
-                                cb?.first?.invoke()
-                            }
-                        }
-
-                        override fun onAdFailedToLoad(loadAdError: LoadAdError) {
-                            runOnMainThread {
-                                cancelPendingWaitTimeout()
-                                val reason = "Código ${loadAdError.code}: ${loadAdError.message}"
-                                cachedRewardedAd = null
-                                lastErrorDetail = reason
-                                isLoading.set(false)
-                                _adState.value = AdLoadState.Error(reason)
-                                Log.e(TAG, "[Load] RewardedAd falhou: $reason")
-                                val cb = activeLoadCallbacks
-                                activeLoadCallbacks = null
-                                cb?.second?.invoke(reason)
-                            }
+                ad.loadAd(StartAppAd.AdMode.REWARDED_VIDEO, object : AdEventListener {
+                    override fun onReceiveAd(adInstance: Ad) {
+                        runOnMainThread {
+                            cancelPendingWaitTimeout()
+                            cachedRewardedAd = ad
+                            lastErrorDetail = null
+                            isLoading.set(false)
+                            _adState.value = AdLoadState.Ready("Start.io Recompensado Pronto")
+                            Log.i(TAG, "[Load] StartAppAd carregado com sucesso.")
+                            val cb = activeLoadCallbacks
+                            activeLoadCallbacks = null
+                            cb?.first?.invoke()
                         }
                     }
-                )
+
+                    override fun onFailedToReceiveAd(adInstance: Ad?) {
+                        runOnMainThread {
+                            cancelPendingWaitTimeout()
+                            val reason = adInstance?.errorMessage ?: "Falha ao carregar anúncio Start.io"
+                            cachedRewardedAd = null
+                            lastErrorDetail = reason
+                            isLoading.set(false)
+                            _adState.value = AdLoadState.Error(reason)
+                            Log.e(TAG, "[Load] StartAppAd falhou de imediato: $reason")
+                            val cb = activeLoadCallbacks
+                            activeLoadCallbacks = null
+                            cb?.second?.invoke(reason)
+                        }
+                    }
+                })
             } catch (e: Exception) {
                 runOnMainThread {
                     cancelPendingWaitTimeout()
@@ -256,7 +254,7 @@ object RewardedAdManager {
                     lastErrorDetail = reason
                     isLoading.set(false)
                     _adState.value = AdLoadState.Error(reason)
-                    Log.e(TAG, "[Load] Exceção ao solicitar anúncio: $reason", e)
+                    Log.e(TAG, "[Load] Exceção ao solicitar anúncio Start.io: $reason", e)
                     val cb = activeLoadCallbacks
                     activeLoadCallbacks = null
                     cb?.second?.invoke(reason)
@@ -265,6 +263,12 @@ object RewardedAdManager {
         }
     }
 
+    /**
+     * Estratégia de fallback imediato e timeout de 3 segundos:
+     * - Se o anúncio estiver pronto em cache, exibe-o.
+     * - Se demorar mais de 3 segundos a carregar ou falhar de imediato, faz fallback automático
+     *   sem bloquear o utilizador, iniciando a ligação VPN diretamente.
+     */
     fun showRequiredAdOrBlock(
         activity: Activity,
         onAdClosedConnectVpn: () -> Unit,
@@ -272,45 +276,49 @@ object RewardedAdManager {
     ) {
         activityRef = WeakReference(activity)
         runOnMainThread {
-            if (!isConfigured()) {
-                val msg = "Modo de Produção: configure os IDs reais do Google AdMob."
-                Log.w(TAG, "[Connect] $msg")
-                onBlocked(msg)
-                return@runOnMainThread
-            }
-
             val rewarded = cachedRewardedAd
-            if (rewarded != null) {
+            if (rewarded != null && rewarded.isReady) {
                 displayMandatoryRewardedAd(activity, rewarded, onAdClosedConnectVpn, onBlocked)
                 return@runOnMainThread
             }
 
-            Log.i(TAG, "[Connect] Sem anúncio em cache; carregando anúncio obrigatório antes da VPN...")
+            Log.i(TAG, "[Connect] Sem anúncio em cache; a carregar com timeout de 3s...")
+            val fallbackTriggered = AtomicBoolean(false)
+
+            val triggerFallback = { cleanMsg: String ->
+                if (fallbackTriggered.compareAndSet(false, true)) {
+                    cancelPendingWaitTimeout()
+                    activeLoadCallbacks = null
+                    Log.w(TAG, "[Connect] Fallback ativado ($cleanMsg). A ligar VPN sem anúncio.")
+                    Toast.makeText(activity.applicationContext, cleanMsg, Toast.LENGTH_SHORT).show()
+                    onAdClosedConnectVpn()
+                }
+            }
+
             scheduleWaitTimeout {
                 if (activity.isFinishing || activity.isDestroyed) return@scheduleWaitTimeout
-                activeLoadCallbacks = null
-                Log.w(TAG, "[Connect] Tempo limite de anúncio esgotado. Conexão VPN bloqueada.")
-                onBlocked("Anúncio indisponível no momento. Por favor, aguarde alguns segundos e tente novamente.")
+                triggerFallback("A ligar diretamente...")
             }
 
             loadAd(
                 context = activity,
                 onLoaded = {
-                    cancelPendingWaitTimeout()
                     if (activity.isFinishing || activity.isDestroyed) return@loadAd
+                    if (fallbackTriggered.get()) return@loadAd
+                    cancelPendingWaitTimeout()
                     val readyRewarded = cachedRewardedAd
-                    if (readyRewarded != null) {
-                        displayMandatoryRewardedAd(activity, readyRewarded, onAdClosedConnectVpn, onBlocked)
+                    if (readyRewarded != null && readyRewarded.isReady) {
+                        displayMandatoryRewardedAd(activity, readyRewarded, onAdClosedConnectVpn) { _ ->
+                            triggerFallback("A ligar diretamente...")
+                        }
                     } else {
-                        Log.w(TAG, "[Connect] Anúncio não ficou pronto. Conexão bloqueada.")
-                        onBlocked("Anúncio não carregou a tempo. Tente novamente.")
+                        triggerFallback("Ligação disponível sem anúncio no momento")
                     }
                 },
                 onFailed = { detail ->
-                    cancelPendingWaitTimeout()
                     if (activity.isFinishing || activity.isDestroyed) return@loadAd
-                    Log.w(TAG, "[Connect] Erro ao carregar anúncio obrigatório ($detail). Conexão bloqueada.")
-                    onBlocked("Anúncio indisponível ($detail). A conexão VPN requer a exibição de um anúncio.")
+                    Log.w(TAG, "[Connect] Falha imediata no carregamento do anúncio: $detail")
+                    triggerFallback("Ligação disponível sem anúncio no momento")
                 }
             )
         }
@@ -323,8 +331,8 @@ object RewardedAdManager {
         activityRef = WeakReference(activity)
         runOnMainThread {
             val rewarded = cachedRewardedAd
-            if (rewarded == null) {
-                onFinished(false, "Nenhum anúncio em cache.")
+            if (rewarded == null || !rewarded.isReady) {
+                onFinished(false, "Nenhum anúncio Start.io em cache.")
                 return@runOnMainThread
             }
 
@@ -332,29 +340,37 @@ object RewardedAdManager {
             _adState.value = AdLoadState.Idle
             val completed = AtomicBoolean(false)
 
-            rewarded.fullScreenContentCallback = object : FullScreenContentCallback() {
-                override fun onAdDismissedFullScreenContent() {
-                    if (completed.compareAndSet(false, true)) {
-                        preloadSilently(activity, force = true)
-                        onFinished(true, "Anúncio Recompensado AdMob exibido e fechado com sucesso.")
-                    }
-                }
-
-                override fun onAdFailedToShowFullScreenContent(adError: AdError) {
-                    if (completed.compareAndSet(false, true)) {
-                        preloadSilently(activity, force = true)
-                        onFinished(false, "Falha ao exibir Recompensado: ${adError.message}")
-                    }
-                }
+            rewarded.setVideoListener {
+                Log.i(TAG, "[Show] Vídeo premiado Start.io concluído.")
             }
 
-            try {
-                rewarded.show(activity) { rewardItem ->
-                    Log.i(TAG, "[Show] Recompensa concedida: ${rewardItem.amount} ${rewardItem.type}")
+            val shown = rewarded.showAd(object : AdDisplayListener {
+                override fun adDisplayed(ad: Ad?) {
+                    Log.i(TAG, "[Show] StartAppAd exibido na tela.")
                 }
-            } catch (e: Exception) {
+
+                override fun adHidden(ad: Ad?) {
+                    if (completed.compareAndSet(false, true)) {
+                        preloadSilently(activity, force = true)
+                        onFinished(true, "Anúncio Recompensado Start.io exibido com sucesso.")
+                    }
+                }
+
+                override fun adClicked(ad: Ad?) {
+                    Log.i(TAG, "[Show] StartAppAd clicado.")
+                }
+
+                override fun adNotDisplayed(ad: Ad?) {
+                    if (completed.compareAndSet(false, true)) {
+                        preloadSilently(activity, force = true)
+                        onFinished(false, "Ligação disponível sem anúncio no momento.")
+                    }
+                }
+            })
+
+            if (!shown) {
                 if (completed.compareAndSet(false, true)) {
-                    onFinished(false, "Erro ao exibir: ${e.message}")
+                    onFinished(false, "Ligação disponível sem anúncio no momento.")
                 }
             }
         }
@@ -362,46 +378,47 @@ object RewardedAdManager {
 
     private fun displayMandatoryRewardedAd(
         activity: Activity,
-        rewarded: RewardedAd,
+        rewarded: StartAppAd,
         onAdClosedConnectVpn: () -> Unit,
-        onBlocked: (String) -> Unit
+        onFallback: (String) -> Unit
     ) {
         cachedRewardedAd = null
         _adState.value = AdLoadState.Idle
         val callbackDelivered = AtomicBoolean(false)
 
-        rewarded.fullScreenContentCallback = object : FullScreenContentCallback() {
-            override fun onAdDismissedFullScreenContent() {
+        rewarded.setVideoListener {
+            Log.i(TAG, "[Show] Vídeo premiado Start.io concluído com sucesso.")
+        }
+
+        val shown = rewarded.showAd(object : AdDisplayListener {
+            override fun adDisplayed(ad: Ad?) {
+                Log.i(TAG, "[Show] Anúncio Recompensado Start.io exibido na tela.")
+            }
+
+            override fun adHidden(ad: Ad?) {
                 if (!callbackDelivered.compareAndSet(false, true)) return
                 Log.i(TAG, "[Show] Anúncio fechado pelo usuário. Iniciando túnel VPN com sucesso.")
                 onAdClosedConnectVpn()
                 preloadSilently(activity, force = true)
             }
 
-            override fun onAdFailedToShowFullScreenContent(adError: AdError) {
+            override fun adClicked(ad: Ad?) {
+                Log.i(TAG, "[Show] Anúncio Start.io clicado.")
+            }
+
+            override fun adNotDisplayed(ad: Ad?) {
                 if (!callbackDelivered.compareAndSet(false, true)) return
-                Log.e(TAG, "[Show] Falha ao renderizar anúncio Recompensado: ${adError.message}")
-                lastErrorDetail = adError.message
-                _adState.value = AdLoadState.Error(adError.message)
+                Log.e(TAG, "[Show] Falha ao renderizar anúncio Start.io Recompensado.")
                 preloadSilently(activity, force = true)
-                onBlocked("Falha ao exibir o anúncio. Por favor, tente novamente.")
+                onFallback("Ligação disponível sem anúncio no momento")
             }
+        })
 
-            override fun onAdShowedFullScreenContent() {
-                Log.i(TAG, "[Show] Anúncio Recompensado do AdMob exibido na tela.")
-            }
-        }
-
-        try {
-            rewarded.show(activity) { rewardItem ->
-                Log.i(TAG, "[Show] Recompensa obtida: ${rewardItem.amount} ${rewardItem.type}")
-            }
-        } catch (e: Exception) {
-            if (callbackDelivered.compareAndSet(false, true)) {
-                Log.e(TAG, "[Show] Exceção ao abrir anúncio: ${e.message}", e)
-                preloadSilently(activity, force = true)
-                onBlocked("Não foi possível abrir o anúncio: ${e.message}")
-            }
+        if (!shown) {
+            if (!callbackDelivered.compareAndSet(false, true)) return
+            Log.e(TAG, "[Show] Não foi possível abrir o anúncio Start.io.")
+            preloadSilently(activity, force = true)
+            onFallback("Ligação disponível sem anúncio no momento")
         }
     }
 

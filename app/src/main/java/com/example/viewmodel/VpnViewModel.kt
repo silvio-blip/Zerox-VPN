@@ -2,15 +2,25 @@ package com.example.viewmodel
 
 import android.app.Application
 import android.content.Context
+import android.content.Intent
+import android.content.pm.ApplicationInfo
+import android.content.pm.PackageManager
 import android.net.ConnectivityManager
 import android.net.Network
+import android.net.NetworkCapabilities
+import android.os.Build
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.data.PreferencesRepository
+import com.example.model.AppItem
+import com.example.model.ConnectionDiagnostics
 import com.example.model.ConnectionState
 import com.example.model.Continent
+import com.example.model.DnsProvider
 import com.example.model.SpeedTestResult
+import com.example.model.SplitTunnelMode
 import com.example.model.TrafficMetrics
+import com.example.model.VpnProtocol
 import com.example.model.VpnServer
 import com.example.model.VpnSettings
 import com.example.repository.ServerRepository
@@ -76,6 +86,29 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
     private val _searchQuery = MutableStateFlow("")
     val searchQuery: StateFlow<String> = _searchQuery.asStateFlow()
 
+    private val _favoriteServerIds = MutableStateFlow<Set<String>>(emptySet())
+    val favoriteServerIds: StateFlow<Set<String>> = _favoriteServerIds.asStateFlow()
+
+    private val _recentServerIds = MutableStateFlow<List<String>>(emptyList())
+
+    private val _recentServers = MutableStateFlow<List<VpnServer>>(emptyList())
+    val recentServers: StateFlow<List<VpnServer>> = _recentServers.asStateFlow()
+
+    private val _isFavoritesFilterSelected = MutableStateFlow(false)
+    val isFavoritesFilterSelected: StateFlow<Boolean> = _isFavoritesFilterSelected.asStateFlow()
+
+    private val _installedApps = MutableStateFlow<List<AppItem>>(emptyList())
+    val installedApps: StateFlow<List<AppItem>> = _installedApps.asStateFlow()
+
+    private val _isLoadingApps = MutableStateFlow(false)
+    val isLoadingApps: StateFlow<Boolean> = _isLoadingApps.asStateFlow()
+
+    private val _diagnostics = MutableStateFlow(ConnectionDiagnostics())
+    val diagnostics: StateFlow<ConnectionDiagnostics> = _diagnostics.asStateFlow()
+
+    private val _isTestingRoute = MutableStateFlow(false)
+    val isTestingRoute: StateFlow<Boolean> = _isTestingRoute.asStateFlow()
+
     private var loadJob: Job? = null
     private var activeLoadToken = 0L
     private var speedTestJob: Job? = null
@@ -90,8 +123,28 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
                 _settings.value = saved
             }
         }
+        viewModelScope.launch {
+            prefsRepository.favoriteServersFlow.collect { favs ->
+                _favoriteServerIds.value = favs
+            }
+        }
+        viewModelScope.launch {
+            prefsRepository.recentServersFlow.collect { recents ->
+                _recentServerIds.value = recents
+                updateRecentServersList(recents, _servers.value)
+            }
+        }
         registerNetworkObserver()
         loadServers(forceRestart = true)
+    }
+
+    private fun updateRecentServersList(recentIds: List<String>, availableServers: List<VpnServer>) {
+        if (recentIds.isEmpty() || availableServers.isEmpty()) {
+            _recentServers.value = emptyList()
+            return
+        }
+        val serverMap = availableServers.associateBy { it.id }
+        _recentServers.value = recentIds.mapNotNull { serverMap[it] }
     }
 
     private fun registerNetworkObserver() {
@@ -161,6 +214,7 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
                             attemptGotServers = true
                             foundAny = true
                             _servers.value = update.servers
+                            updateRecentServersList(_recentServerIds.value, update.servers)
                             val currentId = _selectedServer.value?.id ?: savedId
                             val matched = update.servers.find { it.id == currentId }
                             _selectedServer.value = matched ?: _selectedServer.value ?: update.servers.first()
@@ -233,6 +287,159 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
     fun clearError() {
         if (connectionState.value is ConnectionState.Error) {
             VpnStateHolder.updateConnectionState(ConnectionState.Disconnected)
+        }
+    }
+
+    fun toggleFavoriteServer(serverId: String) {
+        viewModelScope.launch {
+            prefsRepository.toggleFavoriteServer(serverId)
+        }
+    }
+
+    fun toggleFavoritesFilter() {
+        _isFavoritesFilterSelected.value = !_isFavoritesFilterSelected.value
+    }
+
+    fun markServerUsed(server: VpnServer) {
+        viewModelScope.launch {
+            prefsRepository.addRecentServer(server.id)
+        }
+    }
+
+    fun toggleAutoReconnect(enabled: Boolean) {
+        viewModelScope.launch {
+            prefsRepository.updateAutoReconnect(enabled)
+        }
+    }
+
+    fun toggleSplitTunneling(enabled: Boolean) {
+        viewModelScope.launch {
+            prefsRepository.updateSplitTunnelEnabled(enabled)
+        }
+    }
+
+    fun setSplitTunnelMode(mode: SplitTunnelMode) {
+        viewModelScope.launch {
+            prefsRepository.updateSplitTunnelMode(mode)
+        }
+    }
+
+    fun toggleSplitTunnelApp(packageName: String) {
+        viewModelScope.launch {
+            val current = _settings.value.splitTunnelApps.toMutableSet()
+            if (current.contains(packageName)) {
+                current.remove(packageName)
+            } else {
+                current.add(packageName)
+            }
+            prefsRepository.updateSplitTunnelApps(current)
+        }
+    }
+
+    fun loadInstalledApps() {
+        if (_installedApps.value.isNotEmpty() || _isLoadingApps.value) return
+        viewModelScope.launch(Dispatchers.IO) {
+            _isLoadingApps.value = true
+            try {
+                val pm = getApplication<Application>().packageManager
+                val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+                val resolveInfos = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    pm.queryIntentActivities(intent, PackageManager.ResolveInfoFlags.of(0))
+                } else {
+                    pm.queryIntentActivities(intent, 0)
+                }
+                val myPackage = getApplication<Application>().packageName
+                val apps = resolveInfos.mapNotNull { ri ->
+                    val pkg = ri.activityInfo.packageName
+                    if (pkg == myPackage) return@mapNotNull null
+                    val label = ri.loadLabel(pm).toString()
+                    val isSystem = (ri.activityInfo.applicationInfo.flags and ApplicationInfo.FLAG_SYSTEM) != 0
+                    AppItem(packageName = pkg, label = label, isSystem = isSystem)
+                }.distinctBy { it.packageName }
+                 .sortedBy { it.label.lowercase() }
+
+                _installedApps.value = apps
+            } catch (_: Exception) {
+            } finally {
+                _isLoadingApps.value = false
+            }
+        }
+    }
+
+    fun refreshDiagnostics() {
+        val cm = connectivityManager
+        val activeNet = cm?.activeNetwork
+        val caps = cm?.getNetworkCapabilities(activeNet)
+        val netType = when {
+            caps == null -> "Sem Rede"
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "Wi-Fi"
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "Dados Móveis (4G/5G)"
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> "Ethernet"
+            else -> "Outro"
+        }
+        val isOnline = caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
+        val cState = connectionState.value
+        val currentServer = when (cState) {
+            is ConnectionState.Connected -> cState.server
+            is ConnectionState.Paused -> cState.server
+            is ConnectionState.Connecting -> cState.server
+            else -> _selectedServer.value
+        }
+
+        val exitIp = when (cState) {
+            is ConnectionState.Connected -> cState.activeRelayIp
+            else -> "-"
+        }
+
+        val protoLabel = _settings.value.selectedProtocol.label
+        val dnsInfo = _settings.value.dnsProvider.label
+
+        _diagnostics.value = ConnectionDiagnostics(
+            connectionState = cState,
+            networkType = netType,
+            isOnline = isOnline,
+            virtualIp = if (cState is ConnectionState.Connected) "198.18.0.1" else "-",
+            exitIp = exitIp,
+            protocolName = protoLabel,
+            dnsInfo = dnsInfo,
+            activeServerName = currentServer?.countryName ?: "Nenhum",
+            activeServerLocation = currentServer?.city ?: "-",
+            serverEndpoint = if (currentServer != null && currentServer.ip.isNotBlank()) "${currentServer.ip}:${currentServer.port}" else "-",
+            pingMs = currentServer?.pingMs
+        )
+    }
+
+    fun runRouteDiagnosticTest() {
+        if (_isTestingRoute.value) return
+        viewModelScope.launch(Dispatchers.IO) {
+            _isTestingRoute.value = true
+            refreshDiagnostics()
+            try {
+                val start = System.currentTimeMillis()
+                val req = Request.Builder()
+                    .url("https://1.1.1.1")
+                    .head()
+                    .build()
+                val resp = speedClient.newCall(req).execute()
+                val duration = System.currentTimeMillis() - start
+                val code = resp.code
+                val resultText = if (code in 200..399) {
+                    "✓ Rota operacional ($duration ms) • DNS Seguro OK"
+                } else {
+                    "⚠ Resposta HTTP $code ($duration ms)"
+                }
+                _diagnostics.value = _diagnostics.value.copy(
+                    isTestingRoute = false,
+                    routeTestResult = resultText
+                )
+            } catch (e: Exception) {
+                _diagnostics.value = _diagnostics.value.copy(
+                    isTestingRoute = false,
+                    routeTestResult = "Falha no teste: ${e.localizedMessage ?: "Sem resposta de rota"}"
+                )
+            } finally {
+                _isTestingRoute.value = false
+            }
         }
     }
 

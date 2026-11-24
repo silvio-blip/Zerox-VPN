@@ -23,6 +23,7 @@ import com.example.model.Continent
 import com.example.model.DnsProvider
 import com.example.model.RelayEndpoint
 import com.example.model.RelayType
+import com.example.model.SplitTunnelMode
 import com.example.model.TrafficMetrics
 import com.example.model.VpnProtocol
 import com.example.model.VpnServer
@@ -81,6 +82,21 @@ class AtlasVpnService : VpnService() {
     @Volatile
     private var lastTotalTxBytes = 0L
 
+    @Volatile
+    private var lastActiveNetwork: Network? = null
+
+    @Volatile
+    private var activeAutoReconnect = true
+
+    @Volatile
+    private var activeSplitTunnelEnabled = false
+
+    @Volatile
+    private var activeSplitTunnelMode = SplitTunnelMode.BYPASS
+
+    @Volatile
+    private var activeSplitTunnelApps = emptySet<String>()
+
     private val statusRequestReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent?.action == VpnIpc.ACTION_REQUEST_STATUS) {
@@ -110,6 +126,10 @@ class AtlasVpnService : VpnService() {
         const val EXTRA_KILL_SWITCH = "kill_switch"
         const val EXTRA_DNS_PROVIDER = "dns_provider"
         const val EXTRA_PROTOCOL = "protocol"
+        const val EXTRA_AUTO_RECONNECT = "auto_reconnect"
+        const val EXTRA_SPLIT_TUNNEL_ENABLED = "split_tunnel_enabled"
+        const val EXTRA_SPLIT_TUNNEL_MODE = "split_tunnel_mode"
+        const val EXTRA_SPLIT_TUNNEL_APPS = "split_tunnel_apps"
 
         fun hasPersistedSession(context: Context): Boolean {
             return !context.getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
@@ -123,6 +143,10 @@ class AtlasVpnService : VpnService() {
         val killSwitch: Boolean,
         val dnsProvider: DnsProvider,
         val preferredProtocol: VpnProtocol,
+        val autoReconnect: Boolean = true,
+        val splitTunnelEnabled: Boolean = false,
+        val splitTunnelMode: SplitTunnelMode = SplitTunnelMode.BYPASS,
+        val splitTunnelApps: Set<String> = emptySet(),
         val isPaused: Boolean = false,
         val hasConnected: Boolean = false,
         val accElapsedSeconds: Long = 0L,
@@ -149,12 +173,43 @@ class AtlasVpnService : VpnService() {
         connectivityManager = cm
         val cb = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                    runCatching { setUnderlyingNetworks(arrayOf(network)) }
+                }
+                val prevNetwork = lastActiveNetwork
+                lastActiveNetwork = network
                 if (manualStopRequested.get() || isPausedState.get()) return
                 val server = activeServerRef ?: return
                 if (!isRunning.get()) return
+
                 val relay = localRelay ?: return
-                if (relay.getConsecutiveFailures() > 0) {
+                val networkSwitched = prevNetwork != null && prevNetwork != network
+                if (networkSwitched && activeAutoReconnect) {
+                    Log.i(TAG, "Transição de rede detetada (Wi-Fi/Dados Móveis). Auto-reconexão inteligente revalidando o túnel...")
+                    updateNotificationRealtime(
+                        title = "Zerox VPN • Ajustando Rota...",
+                        text = "Nova ligação de rede detetada. Revalidando túnel...",
+                        bigText = "Auto-reconexão inteligente ativa. Mantendo o túnel seguro.",
+                        whenMillis = System.currentTimeMillis(),
+                        useChronometer = false,
+                        isPausedNotification = false
+                    )
                     refreshRelayPoolInBackground(server, sessionGeneration.get(), relay)
+                } else if (relay.getConsecutiveFailures() > 0) {
+                    refreshRelayPoolInBackground(server, sessionGeneration.get(), relay)
+                }
+            }
+
+            override fun onLost(network: Network) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                    runCatching { setUnderlyingNetworks(null) }
+                }
+                if (activeAutoReconnect && isRunning.get() && !manualStopRequested.get() && !isPausedState.get()) {
+                    activeServerRef?.let { server ->
+                        localRelay?.let { relay ->
+                            refreshRelayPoolInBackground(server, sessionGeneration.get(), relay)
+                        }
+                    }
                 }
             }
         }
@@ -199,6 +254,11 @@ class AtlasVpnService : VpnService() {
                 activeServerRef = saved.server
                 VpnStateHolder.activeTargetServer = saved.server
 
+                activeAutoReconnect = saved.autoReconnect
+                activeSplitTunnelEnabled = saved.splitTunnelEnabled
+                activeSplitTunnelMode = saved.splitTunnelMode
+                activeSplitTunnelApps = saved.splitTunnelApps
+
                 val newGen = sessionGeneration.incrementAndGet()
                 stopTunnelOnly()
                 persistActiveSession(
@@ -206,6 +266,10 @@ class AtlasVpnService : VpnService() {
                     killSwitch = saved.killSwitch,
                     dnsProvider = saved.dnsProvider,
                     preferredProtocol = saved.preferredProtocol,
+                    autoReconnect = saved.autoReconnect,
+                    splitTunnelEnabled = saved.splitTunnelEnabled,
+                    splitTunnelMode = saved.splitTunnelMode,
+                    splitTunnelApps = saved.splitTunnelApps,
                     isPaused = false,
                     hasConnected = true,
                     accElapsedSeconds = lastTotalElapsedSeconds,
@@ -227,6 +291,10 @@ class AtlasVpnService : VpnService() {
                     killSwitch = saved.killSwitch,
                     dnsProvider = saved.dnsProvider,
                     preferredProtocol = saved.preferredProtocol,
+                    autoReconnect = saved.autoReconnect,
+                    splitTunnelEnabled = saved.splitTunnelEnabled,
+                    splitTunnelMode = saved.splitTunnelMode,
+                    splitTunnelApps = saved.splitTunnelApps,
                     baseElapsedSeconds = lastTotalElapsedSeconds,
                     baseRxBytes = lastTotalRxBytes,
                     baseTxBytes = lastTotalTxBytes,
@@ -252,6 +320,11 @@ class AtlasVpnService : VpnService() {
             lastTotalElapsedSeconds = restored.accElapsedSeconds
             lastTotalRxBytes = restored.accRxBytes
             lastTotalTxBytes = restored.accTxBytes
+
+            activeAutoReconnect = restored.autoReconnect
+            activeSplitTunnelEnabled = restored.splitTunnelEnabled
+            activeSplitTunnelMode = restored.splitTunnelMode
+            activeSplitTunnelApps = restored.splitTunnelApps
 
             val pausedState = ConnectionState.Paused(
                 server = restored.server,
@@ -279,6 +352,10 @@ class AtlasVpnService : VpnService() {
         val killSwitch: Boolean
         val dnsProvider: DnsProvider
         val preferredProtocol: VpnProtocol
+        val autoReconnect: Boolean
+        val splitTunnelEnabled: Boolean
+        val splitTunnelMode: SplitTunnelMode
+        val splitTunnelApps: Set<String>
         val baseElapsed: Long
         val baseRx: Long
         val baseTx: Long
@@ -289,6 +366,10 @@ class AtlasVpnService : VpnService() {
             killSwitch = restored.killSwitch
             dnsProvider = restored.dnsProvider
             preferredProtocol = restored.preferredProtocol
+            autoReconnect = restored.autoReconnect
+            splitTunnelEnabled = restored.splitTunnelEnabled
+            splitTunnelMode = restored.splitTunnelMode
+            splitTunnelApps = restored.splitTunnelApps
             hasConnectedOnce.set(restored.hasConnected)
             baseElapsed = restored.accElapsedSeconds
             baseRx = restored.accRxBytes
@@ -307,6 +388,12 @@ class AtlasVpnService : VpnService() {
             dnsProvider = runCatching { DnsProvider.valueOf(dnsName) }.getOrDefault(DnsProvider.CLOUDFLARE)
             val protocolName = intent?.getStringExtra(EXTRA_PROTOCOL) ?: VpnProtocol.AUTO.name
             preferredProtocol = runCatching { VpnProtocol.valueOf(protocolName) }.getOrDefault(VpnProtocol.AUTO)
+
+            autoReconnect = intent?.getBooleanExtra(EXTRA_AUTO_RECONNECT, true) ?: true
+            splitTunnelEnabled = intent?.getBooleanExtra(EXTRA_SPLIT_TUNNEL_ENABLED, false) ?: false
+            val splitModeName = intent?.getStringExtra(EXTRA_SPLIT_TUNNEL_MODE) ?: SplitTunnelMode.BYPASS.name
+            splitTunnelMode = runCatching { SplitTunnelMode.valueOf(splitModeName) }.getOrDefault(SplitTunnelMode.BYPASS)
+            splitTunnelApps = intent?.getStringArrayListExtra(EXTRA_SPLIT_TUNNEL_APPS)?.toSet() ?: emptySet()
 
             val parsedFromExtra = VpnIpc.serverFromJson(intent?.getStringExtra(EXTRA_SERVER_JSON))
             targetServer = parsedFromExtra ?: VpnStateHolder.activeTargetServer ?: VpnServer(
@@ -334,6 +421,11 @@ class AtlasVpnService : VpnService() {
             VpnStateHolder.activeTargetServer = targetServer
         }
 
+        activeAutoReconnect = autoReconnect
+        activeSplitTunnelEnabled = splitTunnelEnabled
+        activeSplitTunnelMode = splitTunnelMode
+        activeSplitTunnelApps = splitTunnelApps
+
         activeServerRef = targetServer
         val newGen = sessionGeneration.incrementAndGet()
         stopTunnelOnly()
@@ -342,6 +434,10 @@ class AtlasVpnService : VpnService() {
             killSwitch = killSwitch,
             dnsProvider = dnsProvider,
             preferredProtocol = preferredProtocol,
+            autoReconnect = autoReconnect,
+            splitTunnelEnabled = splitTunnelEnabled,
+            splitTunnelMode = splitTunnelMode,
+            splitTunnelApps = splitTunnelApps,
             isPaused = false,
             hasConnected = hasConnectedOnce.get(),
             accElapsedSeconds = baseElapsed,
@@ -363,6 +459,10 @@ class AtlasVpnService : VpnService() {
             killSwitch = killSwitch,
             dnsProvider = dnsProvider,
             preferredProtocol = preferredProtocol,
+            autoReconnect = autoReconnect,
+            splitTunnelEnabled = splitTunnelEnabled,
+            splitTunnelMode = splitTunnelMode,
+            splitTunnelApps = splitTunnelApps,
             baseElapsedSeconds = baseElapsed,
             baseRxBytes = baseRx,
             baseTxBytes = baseTx,
@@ -396,6 +496,10 @@ class AtlasVpnService : VpnService() {
             killSwitch = saved?.killSwitch ?: false,
             dnsProvider = saved?.dnsProvider ?: DnsProvider.CLOUDFLARE,
             preferredProtocol = saved?.preferredProtocol ?: server.protocol,
+            autoReconnect = saved?.autoReconnect ?: activeAutoReconnect,
+            splitTunnelEnabled = saved?.splitTunnelEnabled ?: activeSplitTunnelEnabled,
+            splitTunnelMode = saved?.splitTunnelMode ?: activeSplitTunnelMode,
+            splitTunnelApps = saved?.splitTunnelApps ?: activeSplitTunnelApps,
             isPaused = true,
             hasConnected = true,
             accElapsedSeconds = accElapsed,
@@ -580,6 +684,10 @@ class AtlasVpnService : VpnService() {
         killSwitch: Boolean,
         dnsProvider: DnsProvider,
         preferredProtocol: VpnProtocol,
+        autoReconnect: Boolean = activeAutoReconnect,
+        splitTunnelEnabled: Boolean = activeSplitTunnelEnabled,
+        splitTunnelMode: SplitTunnelMode = activeSplitTunnelMode,
+        splitTunnelApps: Set<String> = activeSplitTunnelApps,
         baseElapsedSeconds: Long = 0L,
         baseRxBytes: Long = 0L,
         baseTxBytes: Long = 0L,
@@ -758,6 +866,10 @@ class AtlasVpnService : VpnService() {
                     killSwitch = killSwitch,
                     dnsProvider = dnsProvider,
                     preferredProtocol = preferredProtocol,
+                    autoReconnect = autoReconnect,
+                    splitTunnelEnabled = splitTunnelEnabled,
+                    splitTunnelMode = splitTunnelMode,
+                    splitTunnelApps = splitTunnelApps,
                     isPaused = false,
                     hasConnected = true,
                     accElapsedSeconds = baseElapsedSeconds,
@@ -785,9 +897,36 @@ class AtlasVpnService : VpnService() {
                     .addDnsServer(dnsProvider.primaryIp)
                     .addDnsServer(dnsProvider.secondaryIp)
                     .setMtu(1360)
-                    .addDisallowedApplication(packageName)
+
+                if (splitTunnelEnabled && splitTunnelApps.isNotEmpty()) {
+                    when (splitTunnelMode) {
+                        SplitTunnelMode.BYPASS -> {
+                            vpnBuilder.addDisallowedApplication(packageName)
+                            for (pkg in splitTunnelApps) {
+                                if (pkg != packageName) {
+                                    runCatching { vpnBuilder.addDisallowedApplication(pkg) }
+                                }
+                            }
+                        }
+                        SplitTunnelMode.ONLY_SELECTED -> {
+                            for (pkg in splitTunnelApps) {
+                                if (pkg != packageName) {
+                                    runCatching { vpnBuilder.addAllowedApplication(pkg) }
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    vpnBuilder.addDisallowedApplication(packageName)
+                }
+
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                     vpnBuilder.setMetered(false)
+                }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                    lastActiveNetwork?.let { net ->
+                        runCatching { setUnderlyingNetworks(arrayOf(net)) }
+                    }
                 }
 
                 val pfd = vpnBuilder.establish()
@@ -803,6 +942,10 @@ class AtlasVpnService : VpnService() {
                                 killSwitch = killSwitch,
                                 dnsProvider = dnsProvider,
                                 preferredProtocol = preferredProtocol,
+                                autoReconnect = autoReconnect,
+                                splitTunnelEnabled = splitTunnelEnabled,
+                                splitTunnelMode = splitTunnelMode,
+                                splitTunnelApps = splitTunnelApps,
                                 baseElapsedSeconds = baseElapsedSeconds,
                                 baseRxBytes = baseRxBytes,
                                 baseTxBytes = baseTxBytes,
@@ -878,6 +1021,10 @@ class AtlasVpnService : VpnService() {
                                 killSwitch = killSwitch,
                                 dnsProvider = dnsProvider,
                                 preferredProtocol = preferredProtocol,
+                                autoReconnect = autoReconnect,
+                                splitTunnelEnabled = splitTunnelEnabled,
+                                splitTunnelMode = splitTunnelMode,
+                                splitTunnelApps = splitTunnelApps,
                                 baseElapsedSeconds = lastTotalElapsedSeconds,
                                 baseRxBytes = lastTotalRxBytes,
                                 baseTxBytes = lastTotalTxBytes,
@@ -1186,6 +1333,10 @@ class AtlasVpnService : VpnService() {
         killSwitch: Boolean,
         dnsProvider: DnsProvider,
         preferredProtocol: VpnProtocol,
+        autoReconnect: Boolean = true,
+        splitTunnelEnabled: Boolean = false,
+        splitTunnelMode: SplitTunnelMode = SplitTunnelMode.BYPASS,
+        splitTunnelApps: Set<String> = emptySet(),
         isPaused: Boolean,
         hasConnected: Boolean,
         accElapsedSeconds: Long,
@@ -1193,10 +1344,16 @@ class AtlasVpnService : VpnService() {
         accTxBytes: Long
     ) {
         runCatching {
+            val appsArray = org.json.JSONArray()
+            splitTunnelApps.forEach { appsArray.put(it) }
             val root = VpnIpc.serverToJson(server).apply {
                 put("killSwitch", killSwitch)
                 put("dnsProvider", dnsProvider.name)
                 put("protocol", preferredProtocol.name)
+                put("autoReconnect", autoReconnect)
+                put("splitTunnelEnabled", splitTunnelEnabled)
+                put("splitTunnelMode", splitTunnelMode.name)
+                put("splitTunnelApps", appsArray)
                 put("isPaused", isPaused)
                 put("hasConnected", hasConnected)
                 put("accElapsed", accElapsedSeconds)
@@ -1220,11 +1377,23 @@ class AtlasVpnService : VpnService() {
                 .getOrDefault(VpnProtocol.AUTO)
             val dns = runCatching { DnsProvider.valueOf(root.optString("dnsProvider")) }
                 .getOrDefault(DnsProvider.CLOUDFLARE)
+            val splitMode = runCatching { SplitTunnelMode.valueOf(root.optString("splitTunnelMode")) }
+                .getOrDefault(SplitTunnelMode.BYPASS)
+            val rawApps = root.optJSONArray("splitTunnelApps") ?: org.json.JSONArray()
+            val apps = buildSet {
+                for (i in 0 until rawApps.length()) {
+                    add(rawApps.optString(i))
+                }
+            }
             SavedSession(
                 server = server,
                 killSwitch = root.optBoolean("killSwitch", false),
                 dnsProvider = dns,
                 preferredProtocol = protocol,
+                autoReconnect = root.optBoolean("autoReconnect", true),
+                splitTunnelEnabled = root.optBoolean("splitTunnelEnabled", false),
+                splitTunnelMode = splitMode,
+                splitTunnelApps = apps,
                 isPaused = root.optBoolean("isPaused", false),
                 hasConnected = root.optBoolean("hasConnected", false),
                 accElapsedSeconds = root.optLong("accElapsed", 0L),

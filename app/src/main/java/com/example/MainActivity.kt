@@ -459,6 +459,10 @@ fun MainAppScreen(
     val settings by viewModel.settings.collectAsStateWithLifecycle()
     val selectedContinent by viewModel.selectedContinentFilter.collectAsStateWithLifecycle()
     val searchQuery by viewModel.searchQuery.collectAsStateWithLifecycle()
+    val installedApps by viewModel.installedApps.collectAsStateWithLifecycle()
+    val isLoadingApps by viewModel.isLoadingApps.collectAsStateWithLifecycle()
+    val diagnostics by viewModel.diagnostics.collectAsStateWithLifecycle()
+    val isTestingRoute by viewModel.isTestingRoute.collectAsStateWithLifecycle()
 
     val isConnectedOrConnecting = connectionState is ConnectionState.Connected ||
         connectionState is ConnectionState.Connecting ||
@@ -573,12 +577,23 @@ fun MainAppScreen(
                         adConsentState = adConsentState,
                         adLoadState = adLoadState,
                         isSdkInitialized = isSdkInitialized,
+                        installedApps = installedApps,
+                        isLoadingApps = isLoadingApps,
+                        diagnostics = diagnostics,
+                        isTestingRoute = isTestingRoute,
                         onSettingsChanged = { viewModel.updateSettings(it) },
                         onOpenBatterySettings = onOpenBatterySettings,
                         onRequestVpnPermission = onRequestVpnPermission,
                         onUpdateAdConsent = onUpdateAdConsent,
                         onTestLoadAd = onTestLoadAd,
-                        onTestShowAd = onTestShowAd
+                        onTestShowAd = onTestShowAd,
+                        onLoadApps = { viewModel.loadInstalledApps() },
+                        onToggleSplitTunnelApp = { viewModel.toggleSplitTunnelApp(it) },
+                        onSetSplitTunnelMode = { viewModel.setSplitTunnelMode(it) },
+                        onToggleSplitTunnel = { viewModel.toggleSplitTunneling(it) },
+                        onToggleAutoReconnect = { viewModel.toggleAutoReconnect(it) },
+                        onRefreshDiagnostics = { viewModel.refreshDiagnostics() },
+                        onRunRouteTest = { viewModel.runRouteDiagnosticTest() }
                     )
                 }
 

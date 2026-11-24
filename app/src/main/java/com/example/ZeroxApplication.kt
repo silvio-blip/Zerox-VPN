@@ -18,10 +18,10 @@ class ZeroxApplication : Application() {
 
         val consentState = AdConsentManager.syncState(this)
         Log.i(
-            "AdMobDebug",
-            "[Application] Inicializando Google Mobile Ads (AdMob) no arranque (pacote=$packageName, consentimento=${consentState.hasUserChoice})."
+            "StartIoDebug",
+            "[Application] Inicializando Start.io SDK no arranque (pacote=$packageName, consentimento=${consentState.hasUserChoice})."
         )
-        // Inicializa o SDK do AdMob antecipadamente
+        // Inicializa o SDK do Start.io antecipadamente
         RewardedAdManager.initializeSdk(this)
     }
 

@@ -19,9 +19,11 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AltRoute
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.NetworkCheck
 import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material3.Button
@@ -52,8 +54,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.ads.AdConsentState
 import com.example.ads.AdLoadState
+import com.example.model.AppItem
+import com.example.model.ConnectionDiagnostics
 import com.example.model.DnsProvider
 import com.example.model.PermanentPermissionsStatus
+import com.example.model.SplitTunnelMode
 import com.example.model.VpnProtocol
 import com.example.model.VpnSettings
 import com.example.ui.theme.CyberBackground
@@ -71,15 +76,28 @@ fun SettingsScreen(
     adConsentState: AdConsentState = AdConsentState(),
     adLoadState: AdLoadState = AdLoadState.Idle,
     isSdkInitialized: Boolean = false,
+    installedApps: List<AppItem> = emptyList(),
+    isLoadingApps: Boolean = false,
+    diagnostics: ConnectionDiagnostics = ConnectionDiagnostics(),
+    isTestingRoute: Boolean = false,
     onSettingsChanged: (VpnSettings) -> Unit,
     onOpenBatterySettings: () -> Unit = {},
     onRequestVpnPermission: () -> Unit = {},
     onUpdateAdConsent: (Boolean) -> Unit = {},
     onTestLoadAd: () -> Unit = {},
-    onTestShowAd: () -> Unit = {}
+    onTestShowAd: () -> Unit = {},
+    onLoadApps: () -> Unit = {},
+    onToggleSplitTunnelApp: (String) -> Unit = {},
+    onSetSplitTunnelMode: (SplitTunnelMode) -> Unit = {},
+    onToggleSplitTunnel: (Boolean) -> Unit = {},
+    onToggleAutoReconnect: (Boolean) -> Unit = {},
+    onRefreshDiagnostics: () -> Unit = {},
+    onRunRouteTest: () -> Unit = {}
 ) {
     val context = LocalContext.current
     var showPrivacyModal by rememberSaveable { mutableStateOf(false) }
+    var showSplitTunnelModal by rememberSaveable { mutableStateOf(false) }
+    var showDiagnosticsModal by rememberSaveable { mutableStateOf(false) }
 
     Column(
         modifier = Modifier
@@ -168,6 +186,42 @@ fun SettingsScreen(
         }
 
         HorizontalDivider(color = CyberOutline, thickness = 1.dp)
+
+        // Intelligent Auto-Reconnect on Network Change
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 12.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
+                Text(
+                    text = "Auto-Reconexão Inteligente",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = CyberTextMain
+                )
+                Text(
+                    text = "Reconecta o túnel ao alternar entre Wi-Fi e dados móveis (4G/5G) sem quedas de ligação",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = CyberTextMuted
+                )
+            }
+            Switch(
+                checked = settings.autoReconnectOnNetworkChange,
+                onCheckedChange = {
+                    onToggleAutoReconnect(it)
+                    onSettingsChanged(settings.copy(autoReconnectOnNetworkChange = it))
+                },
+                colors = SwitchDefaults.colors(
+                    checkedThumbColor = CyberSecondary,
+                    checkedTrackColor = CyberPrimary.copy(alpha = 0.4f)
+                ),
+                modifier = Modifier.testTag("auto_reconnect_network_toggle")
+            )
+        }
+
+        HorizontalDivider(color = CyberOutline, thickness = 1.dp)
         Spacer(modifier = Modifier.height(16.dp))
 
         // Permanent Mode Permissions Card
@@ -221,6 +275,149 @@ fun SettingsScreen(
                     testTag = "perm_battery_button",
                     onClick = onOpenBatterySettings
                 )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        // Split Tunneling Card
+        Surface(
+            shape = RoundedCornerShape(16.dp),
+            color = CyberSurfaceVariant,
+            border = BorderStroke(
+                1.dp,
+                if (settings.splitTunnelingEnabled) CyberSecondary.copy(alpha = 0.45f) else CyberOutline.copy(alpha = 0.45f)
+            ),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                        Icon(
+                            imageVector = Icons.Default.AltRoute,
+                            contentDescription = "Split Tunneling",
+                            tint = if (settings.splitTunnelingEnabled) CyberSecondary else CyberPrimary
+                        )
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Text(
+                            text = "Túnel Dividido (Split Tunneling)",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = CyberTextMain
+                        )
+                    }
+                    Switch(
+                        checked = settings.splitTunnelingEnabled,
+                        onCheckedChange = {
+                            onToggleSplitTunnel(it)
+                            onSettingsChanged(settings.copy(splitTunnelingEnabled = it))
+                        },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = CyberSecondary,
+                            checkedTrackColor = CyberPrimary.copy(alpha = 0.4f)
+                        ),
+                        modifier = Modifier.testTag("split_tunnel_master_toggle")
+                    )
+                }
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = if (settings.splitTunnelingEnabled) {
+                        "${settings.splitTunnelApps.size} aplicações selecionadas • ${settings.splitTunnelMode.label}"
+                    } else {
+                        "Desativado • Todas as aplicações do dispositivo passam pelo túnel seguro da VPN."
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = CyberTextMuted
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                OutlinedButton(
+                    onClick = {
+                        onLoadApps()
+                        showSplitTunnelModal = true
+                    },
+                    border = BorderStroke(1.dp, CyberPrimary.copy(alpha = 0.6f)),
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("open_split_tunnel_config_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.AltRoute,
+                        contentDescription = null,
+                        tint = CyberPrimary,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "GERIR APLICAÇÕES DO TÚNEL (${settings.splitTunnelApps.size})",
+                        color = CyberPrimary,
+                        fontWeight = FontWeight.Bold,
+                        style = MaterialTheme.typography.labelMedium
+                    )
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        // Quick Diagnostics Card
+        Surface(
+            shape = RoundedCornerShape(16.dp),
+            color = CyberSurfaceVariant,
+            border = BorderStroke(1.dp, CyberPrimary.copy(alpha = 0.35f)),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Default.NetworkCheck,
+                        contentDescription = "Diagnóstico",
+                        tint = CyberSecondary
+                    )
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Text(
+                        text = "Diagnóstico Rápido de Ligação",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = CyberTextMain
+                    )
+                }
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = "Consulte IP atual, protocolo ativo, DNS sem fuga e teste instantaneamente a rota do túnel.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = CyberTextMuted
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                Button(
+                    onClick = {
+                        onRefreshDiagnostics()
+                        showDiagnosticsModal = true
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = CyberSecondary),
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("open_diagnostics_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.NetworkCheck,
+                        contentDescription = null,
+                        tint = CyberBackground,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "ABRIR DIAGNÓSTICO DE REDE",
+                        color = CyberBackground,
+                        fontWeight = FontWeight.Bold,
+                        style = MaterialTheme.typography.labelMedium
+                    )
+                }
             }
         }
 
@@ -385,6 +582,27 @@ fun SettingsScreen(
                 }
             }
         }
+    }
+
+    if (showSplitTunnelModal) {
+        SplitTunnelDialog(
+            installedApps = installedApps,
+            isLoadingApps = isLoadingApps,
+            selectedMode = settings.splitTunnelMode,
+            selectedApps = settings.splitTunnelApps,
+            onModeChanged = { mode -> onSetSplitTunnelMode(mode) },
+            onToggleApp = { pkg -> onToggleSplitTunnelApp(pkg) },
+            onDismiss = { showSplitTunnelModal = false }
+        )
+    }
+
+    if (showDiagnosticsModal) {
+        QuickDiagnosticsDialog(
+            diagnostics = diagnostics,
+            isTestingRoute = isTestingRoute,
+            onRunRouteTest = onRunRouteTest,
+            onDismiss = { showDiagnosticsModal = false }
+        )
     }
 }
 

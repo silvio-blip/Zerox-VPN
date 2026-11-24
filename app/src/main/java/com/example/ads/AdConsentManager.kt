@@ -1,10 +1,8 @@
 package com.example.ads
 
 import android.content.Context
-import android.os.Bundle
 import android.util.Log
-import com.google.ads.mediation.admob.AdMobAdapter
-import com.google.android.gms.ads.AdRequest
+import com.startapp.sdk.adsbase.StartAppSDK
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -16,16 +14,14 @@ data class AdConsentState(
 )
 
 /**
- * Gerencia o consentimento GDPR/LGPD e CCPA de forma não bloqueante em SharedPreferences,
- * configurando parâmetros de anúncios não personalizados (NPA) para o Google AdMob.
+ * Gerencia o consentimento GDPR/LGPD e CCPA para a rede Start.io.
  */
 object AdConsentManager {
-    private const val TAG = "AdMobDebug"
+    private const val TAG = "StartIoDebug"
     private const val PREFS_NAME = "zerox_ad_consent_prefs"
     private const val KEY_HAS_CHOICE = "has_user_choice"
     private const val KEY_PERSONALIZED_GRANTED = "personalized_ads_granted"
     private const val KEY_CONSENT_TIMESTAMP = "consent_timestamp_ms"
-    private const val KEY_IAB_US_PRIVACY = "IABUSPrivacy_String"
 
     private val _consentState = MutableStateFlow(AdConsentState())
     val consentState: StateFlow<AdConsentState> = _consentState.asStateFlow()
@@ -56,7 +52,6 @@ object AdConsentManager {
         )
         _consentState.value = updated
 
-        // Persistência assíncrona (apply) para nunca travar a thread de UI
         appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .putBoolean(KEY_HAS_CHOICE, true)
@@ -64,39 +59,14 @@ object AdConsentManager {
             .putLong(KEY_CONSENT_TIMESTAMP, now)
             .apply()
 
-        // CCPA IAB compliance string: 1YNN (personalizado) vs 1YYN (não personalizado)
-        val usPrivacyString = if (personalizedGranted) "1YNN" else "1YYN"
-        appContext.getSharedPreferences("${appContext.packageName}_preferences", Context.MODE_PRIVATE)
-            .edit()
-            .putString(KEY_IAB_US_PRIVACY, usPrivacyString)
-            .apply()
+        runCatching {
+            StartAppSDK.setUserConsent(appContext, "pas", now, personalizedGranted)
+        }
 
         Log.i(
             TAG,
-            "[Consent] Consentimento atualizado: hasChoice=true, personalized=$personalizedGranted, CCPA=$usPrivacyString"
+            "[Consent] Consentimento Start.io atualizado: hasChoice=true, personalized=$personalizedGranted"
         )
         return updated
-    }
-
-    /**
-     * Constrói a requisição AdRequest do AdMob.
-     * Caso o utilizador não tenha aceite personalização ou opte por não-personalizado,
-     * injeta o parâmetro "npa" = "1" via AdMobAdapter Network Extras.
-     */
-    fun buildAdRequest(context: Context): AdRequest {
-        val state = syncState(context)
-        val builder = AdRequest.Builder()
-
-        if (state.hasUserChoice && !state.personalizedAdsGranted) {
-            val extras = Bundle().apply {
-                putString("npa", "1")
-            }
-            builder.addNetworkExtrasBundle(AdMobAdapter::class.java, extras)
-            Log.d(TAG, "[AdRequest] AdRequest configurado com anúncios NÃO personalizados (npa=1).")
-        } else {
-            Log.d(TAG, "[AdRequest] AdRequest configurado com anúncios padrão.")
-        }
-
-        return builder.build()
     }
 }
